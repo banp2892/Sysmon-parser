@@ -18,6 +18,8 @@ struct ProcessState {
     uint64_t last_cpu_time = 0;
 };
 
+uint64_t numbers_of_logs=0;
+
 std::unordered_map<DWORD, ProcessState> g_ProcessCache;
 std::mutex g_CacheMutex;
 
@@ -68,8 +70,10 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
         if (file.is_open()) {
             file << fullLog.dump() << std::endl;
         }
-
-        std::cout << "[Event Captured] PID: " << pid << " | EventID: " << eventId << std::endl;
+        numbers_of_logs++;
+        if (numbers_of_logs % 10 == 0) { 
+            std::cout << "[Event Captured] PID: " << pid << " | EventID: " << eventId << " Numbers: " << numbers_of_logs << std::endl;
+        }
     }
     return ERROR_SUCCESS;
 }
