@@ -130,7 +130,11 @@ namespace LogEnricher {
             return j;
         }
 
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        HANDLE hProcess = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            FALSE,
+            pid
+        );
 
         if (hProcess) {
             uint64_t current_cpu = ProcessMetrics::GetTotalCPUTime(hProcess);
@@ -160,11 +164,19 @@ namespace LogEnricher {
         }
         else {
             DWORD err = GetLastError();
-            if (err == ERROR_INVALID_PARAMETER || err == ERROR_ACCESS_DENIED) {
-                j["metrics"]["status"] = "Process likely finished or protected";
+            
+            j["metrics"]["status"] = "error";
+            j["metrics"]["error_code"] = err;
+
+            
+            if (err == ERROR_INVALID_PARAMETER) {
+                j["metrics"]["error_type"] = "process_finished";
+            }
+            else if (err == ERROR_ACCESS_DENIED) {
+                j["metrics"]["error_type"] = "access_denied";
             }
             else {
-                j["metrics"]["status"] = "Error code: " + std::to_string(err);
+                j["metrics"]["error_type"] = "unknown";
             }
         }
 
