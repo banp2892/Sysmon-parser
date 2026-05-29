@@ -126,7 +126,9 @@
     <ClCompile Include="Source.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="json.hpp" />
     <ClInclude Include="LogEnricher.h" />
+    <ClInclude Include="Structures.h" />
     <ClInclude Include="SysmonCollector.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -1,4 +1,4 @@
-#include <iostream>
+п»ї#include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -9,8 +9,8 @@
 using json = nlohmann::json;
 
 /**
- * @brief Генерирует уникальное имя файла для текущей сессии.
- * @return std::string Имя файла.
+ * @brief Р“РµРЅРµСЂРёСЂСѓРµС‚ СѓРЅРёРєР°Р»СЊРЅРѕРµ РёРјСЏ С„Р°Р№Р»Р° РґР»СЏ С‚РµРєСѓС‰РµР№ СЃРµСЃСЃРёРё.
+ * @return std::string РРјСЏ С„Р°Р№Р»Р°.
  */
 std::string GetUniqueFilename() {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -22,19 +22,20 @@ std::string GetUniqueFilename() {
 }
 
 /**
- * @brief Функция-обработчик событий Sysmon.
+ * @brief Р¤СѓРЅРєС†РёСЏ-РѕР±СЂР°Р±РѕС‚С‡РёРє СЃРѕР±С‹С‚РёР№ Sysmon.
  */
 DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pContext, EVT_HANDLE hEvent) {
     if (action == EvtSubscribeActionDeliver) {
         std::string xml = SysmonCollector::GetXmlFromEvent(hEvent);
 
         if (!xml.empty()) {
-            json fullLog = LogEnricher::Enrich(xml);
+            DWORD pid = SysmonCollector::GetPidFromXml(xml);
+            json fullLog = LogEnricher::Enrich(xml, pid);
 
-            // Вывод в консоль
-            std::cout << "[Event Captured] Sysmon log received." << std::endl;
+            // Р’С‹РІРѕРґ РІ РєРѕРЅСЃРѕР»СЊ
+            std::cout << "[Event Captured] Sysmon log received. PID = "<<pid << std::endl;
 
-            // Запись в файл
+            // Р—Р°РїРёСЃСЊ РІ С„Р°Р№Р»
             static std::string currentFile = GetUniqueFilename();
             std::ofstream file(currentFile, std::ios::app);
             if (file.is_open()) {
@@ -48,16 +49,16 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 int main() {
     setlocale(LC_ALL, "Russian");
 
-    // Подписка на события Sysmon
+    // РџРѕРґРїРёСЃРєР° РЅР° СЃРѕР±С‹С‚РёСЏ Sysmon
     EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational",
         L"*", NULL, NULL, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
-        std::cerr << "[-] ОШИБКА: Запустите от имени АДМИНИСТРАТОРА!" << std::endl;
+        std::cerr << "[-] РћРЁРР‘РљРђ: Р—Р°РїСѓСЃС‚РёС‚Рµ РѕС‚ РёРјРµРЅРё РђР”РњРРќРРЎРўР РђРўРћР Рђ!" << std::endl;
         return 1;
     }
 
-    std::cout << "[+] Мониторинг Sysmon запущен. Пишем в " << GetUniqueFilename() << "..." << std::endl;
+    std::cout << "[+] РњРѕРЅРёС‚РѕСЂРёРЅРі Sysmon Р·Р°РїСѓС‰РµРЅ. РџРёС€РµРј РІ " << GetUniqueFilename() << "..." << std::endl;
     Sleep(INFINITE);
 
     EvtClose(hSub);
