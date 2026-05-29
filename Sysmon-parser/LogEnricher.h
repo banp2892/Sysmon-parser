@@ -138,10 +138,10 @@ namespace LogEnricher {
 
         if (hProcess) {
             uint64_t current_cpu = ProcessMetrics::GetTotalCPUTime(hProcess);
-            if (last_cpu_time > 0) {
+            /*if (last_cpu_time > 0) {
                 printf("[DEBUG] PID: %lu, Current: %llu, Last: %llu, Diff: %lld\n",
                     pid, current_cpu, last_cpu_time, (long long)(current_cpu - last_cpu_time));
-            }
+            }*/
 
             j["metrics"]["private_bytes"] = ProcessMetrics::GetPrivateBytes(hProcess);
             j["metrics"]["io"] = ProcessMetrics::GetIOCounters(hProcess);
