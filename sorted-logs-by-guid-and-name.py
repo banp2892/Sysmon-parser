@@ -61,13 +61,30 @@ def main():
 
     # Группируем по GUID
     processes = defaultdict(lambda: {"events": [], "name": "unknown"})
+    
     for line in lines:
         data = parse_line(line)
         if data:
+            guid = data["guid"]
             xml = json.loads(line).get("data", "")
             proc_name = get_clean_name(xml)
-            processes[data["guid"]]["events"].append(data)
-            processes[data["guid"]]["name"] = proc_name
+            
+            # --- ЛОГИКА ДЕДУПЛИКАЦИИ ---
+            is_duplicate = False
+            if processes[guid]["events"]:
+                last_event = processes[guid]["events"][-1]
+                
+                # Сравниваем event_id и метрики
+                # (timestamp не сравниваем, так как он всегда будет новым) 
+                if (last_event["event_id"] == data["event_id"] and 
+                    last_event["metrics"] == data["metrics"]):
+                    is_duplicate = True
+            
+            if not is_duplicate:
+                processes[guid]["events"].append(data)
+            # ---------------------------
+            
+            processes[guid]["name"] = proc_name
 
     # Сохраняем каждый процесс в отдельный файл
     for guid, info in processes.items():
