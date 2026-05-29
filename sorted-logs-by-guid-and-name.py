@@ -64,10 +64,8 @@ def main():
     for line in lines:
         data = parse_line(line)
         if data:
-            # Парсим имя процесса из XML для каждого события
             xml = json.loads(line).get("data", "")
             proc_name = get_clean_name(xml)
-            
             processes[data["guid"]]["events"].append(data)
             processes[data["guid"]]["name"] = proc_name
 
@@ -76,15 +74,21 @@ def main():
         events = info["events"]
         events.sort(key=lambda x: x["timestamp"])
         
-        # Формируем имя: svchost.exe_d9cf607a...json
-        safe_name = re.sub(r'[\\/*?:"<>|]', "", info["name"]) # Убираем запрещенные символы
-        filename = f"{safe_name}_{guid}.json"
+        # 1. Очищаем имя процесса от запрещенных символов
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", info["name"])
         
-        output_path = os.path.join(folder_name, filename)
+        # 2. Создаем подпапку для этого процесса
+        process_dir = os.path.join(folder_name, safe_name)
+        os.makedirs(process_dir, exist_ok=True)
+        
+        # 3. Путь к файлу теперь внутри подпапки
+        filename = f"{guid}.json"
+        output_path = os.path.join(process_dir, filename)
+        
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(events, f, indent=4)
             
-    print(f"Готово! Обработано {len(processes)} процессов. Файлы лежат в папке: {folder_name}")
+    print(f"Готово! Данные структурированы в папке: {folder_name}")
 
 if __name__ == "__main__":
     main()
