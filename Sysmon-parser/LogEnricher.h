@@ -1,12 +1,15 @@
 ﻿#pragma once
 #include "json.hpp"
 #include <windows.h>
+#include <winternl.h>
 #include <psapi.h>
 #include <string>
 #include <chrono>
+#include <tlhelp32.h>
 #include <cstdint>
 
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "ntdll.lib")
 
 /**
  * @namespace ProcessMetrics
@@ -65,6 +68,45 @@ namespace ProcessMetrics {
         return 0;
     }
 
+    /**
+    * @brief Получает текущее количество потоков процесса по его PID.
+    * @param pid Идентификатор процесса.
+    * @return DWORD Количество потоков.
+    */
+    inline DWORD GetThreadCount(DWORD pid) {
+        DWORD threadCount = 0;
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+        if (hSnapshot != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 te;
+            te.dwSize = sizeof(THREADENTRY32);
+
+            if (Thread32First(hSnapshot, &te)) {
+                do {
+                    if (te.th32OwnerProcessID == pid) {
+                        threadCount++;
+                    }
+                } while (Thread32Next(hSnapshot, &te));
+            }
+            CloseHandle(hSnapshot);
+        }
+        return threadCount;
+    }
+
+    /**
+     * @brief Получает количество открытых дескрипторов.
+     * @param hProcess Дескриптор процесса.
+     * @return DWORD Количество дескрипторов.
+     */
+    inline DWORD GetHandleCount(HANDLE hProcess) {
+        DWORD count = 0;
+        if (GetProcessHandleCount(hProcess, &count)) {
+            return count;
+        }
+        return 0;
+    }
+
+
 }
 
 /**
@@ -88,13 +130,20 @@ namespace LogEnricher {
             return j;
         }
 
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
 
         if (hProcess) {
             uint64_t current_cpu = ProcessMetrics::GetTotalCPUTime(hProcess);
+            if (last_cpu_time > 0) {
+                printf("[DEBUG] PID: %lu, Current: %llu, Last: %llu, Diff: %lld\n",
+                    pid, current_cpu, last_cpu_time, (long long)(current_cpu - last_cpu_time));
+            }
 
             j["metrics"]["private_bytes"] = ProcessMetrics::GetPrivateBytes(hProcess);
             j["metrics"]["io"] = ProcessMetrics::GetIOCounters(hProcess);
+
+            j["metrics"]["thread_count"] = ProcessMetrics::GetThreadCount(pid);
+            j["metrics"]["handle_count"] = ProcessMetrics::GetHandleCount(hProcess);
 
             // Считаем дельту (слайс)
             if (last_cpu_time > 0 && current_cpu > last_cpu_time) {
