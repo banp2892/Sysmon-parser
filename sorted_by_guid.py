@@ -12,23 +12,41 @@ def ReadJsonData(path):
         return f.readlines()
 
 def parse_line(line):
-    """Извлекает ProcessGuid, EventID и метрики из одной строки JSON."""
     try:
         obj = json.loads(line)
         xml = obj.get("data", "")
         
-        # Регулярные выражения для извлечения данных из XML
-        guid_match = re.search(r'ProcessGuid">\{([^}]+)\}', xml)
+        # Универсальный поиск: ищем и двойные, и одинарные кавычки
+        # Используем re.IGNORECASE для надежности
+        guid_match = re.search(r"ProcessGuid['\"]?>\{([^}]+)\}", xml, re.IGNORECASE)
+        
+        # Ищем EventID независимо от тега
         eid_match = re.search(r'<EventID>(\d+)</EventID>', xml)
         
+        guid = guid_match.group(1) if guid_match else None
+        
+        # Если GUID все еще None, выведем отладочную информацию
+        if not guid:
+            print(f"Внимание: Не удалось найти GUID в строке: {xml[:100]}...")
+            return None
+            
         return {
-            "guid": guid_match.group(1) if guid_match else "unknown",
+            "guid": guid,
             "event_id": eid_match.group(1) if eid_match else "0",
             "metrics": obj.get("metrics", {}),
             "timestamp": obj.get("timestamp", 0)
         }
-    except:
+    except Exception as e:
         return None
+
+def get_clean_name(xml):
+    """Извлекает имя исполняемого файла из пути."""
+    image_match = re.search(r"Image'>([^<]+)</Data>", xml)
+    if image_match:
+        full_path = image_match.group(1)
+        # Берем только последнюю часть пути (имя файла)
+        return os.path.basename(full_path)
+    return "unknown_process"
 
 def main():
     print("Введите путь до файла:")
@@ -42,18 +60,27 @@ def main():
     os.makedirs(folder_name, exist_ok=True)
 
     # Группируем по GUID
-    processes = defaultdict(list)
+    processes = defaultdict(lambda: {"events": [], "name": "unknown"})
     for line in lines:
         data = parse_line(line)
         if data:
-            processes[data["guid"]].append(data)
+            # Парсим имя процесса из XML для каждого события
+            xml = json.loads(line).get("data", "")
+            proc_name = get_clean_name(xml)
+            
+            processes[data["guid"]]["events"].append(data)
+            processes[data["guid"]]["name"] = proc_name
 
     # Сохраняем каждый процесс в отдельный файл
-    for guid, events in processes.items():
-        # Сортируем события по времени
+    for guid, info in processes.items():
+        events = info["events"]
         events.sort(key=lambda x: x["timestamp"])
         
-        output_path = os.path.join(folder_name, f"{guid}.json")
+        # Формируем имя: svchost.exe_d9cf607a...json
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", info["name"]) # Убираем запрещенные символы
+        filename = f"{safe_name}_{guid}.json"
+        
+        output_path = os.path.join(folder_name, filename)
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(events, f, indent=4)
             
