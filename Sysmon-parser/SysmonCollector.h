@@ -44,6 +44,32 @@ namespace SysmonCollector {
     }
 
     /**
+     * @brief Извлекает идентификатор события (EventID) из XML-события.
+     * @param xml Строка XML.
+     * @return DWORD Идентификатор события или 0, если тег не найден.
+     */
+    inline DWORD GetEventIdFromXml(const std::string& xml) {
+        // Тег EventID находится в блоке <System>, который идет в начале XML
+        const std::string openTag = "<EventID>";
+        const std::string closeTag = "</EventID>";
+
+        size_t startPos = xml.find(openTag);
+        if (startPos == std::string::npos) return 0;
+
+        startPos += openTag.length();
+        size_t endPos = xml.find(closeTag, startPos);
+
+        if (endPos == std::string::npos) return 0;
+
+        try {
+            return std::stoul(xml.substr(startPos, endPos - startPos));
+        }
+        catch (...) {
+            return 0;
+        }
+    }
+
+    /**
      * @brief Извлекает идентификатор процесса (PID) из XML-события.
      * @param xml Строка XML.
      * @return DWORD Идентификатор процесса или 0, если тег не найден.

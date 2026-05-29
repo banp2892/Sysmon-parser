@@ -6,7 +6,24 @@
 #include "SysmonCollector.h"
 #include "LogEnricher.h"
 
+#include <mutex>
+#include <unordered_map>
+
 using json = nlohmann::json;
+
+/**
+ * @struct ProcessState
+ * @brief Хранит историю потребления ресурсов конкретным процессом.
+ */
+struct ProcessState {
+    uint64_t last_cpu_time = 0;
+};
+
+// Глобальное хранилище состояний
+std::unordered_map<DWORD, ProcessState> g_ProcessCache;
+std::mutex g_CacheMutex;
+
+
 
 /**
  * @brief Генерирует уникальное имя файла для текущей сессии.
@@ -32,20 +49,39 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
             DWORD pid = SysmonCollector::GetPidFromXml(xml);
             json fullLog = LogEnricher::Enrich(xml, pid);
 
-            // Вывод в консоль
-            std::cout << "[Event Captured] Sysmon log received. PID = "<<pid << std::endl;
+            // 1. Получаем EventID из XML, чтобы понять, нужно ли удалять процесс
+            int eventId = SysmonCollector::GetEventIdFromXml(xml);
 
-            // Запись в файл
-            static std::string currentFile = GetUniqueFilename();
-            std::ofstream file(currentFile, std::ios::app);
-            if (file.is_open()) {
-                file << fullLog.dump() << std::endl;
+            if (eventId == 5) {
+                // Процесс завершен, чистим кэш
+                std::lock_guard<std::mutex> lock(g_CacheMutex);
+                g_ProcessCache.erase(pid);
+            }
+            else {
+                // 2. Обогащаем данными с учетом CPU Slice
+                uint64_t last_cpu = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_CacheMutex);
+                    last_cpu = g_ProcessCache[pid].last_cpu_time;
+                }
+
+                // Вызываем Enrich (с учетом нашей доработки)
+                json fullLog = LogEnricher::Enrich(xml, pid, last_cpu);
+
+                // Вывод в консоль
+                std::cout << "[Event Captured] Sysmon log received. PID = " << pid << std::endl;
+
+                // Запись в файл
+                static std::string currentFile = GetUniqueFilename();
+                std::ofstream file(currentFile, std::ios::app);
+                if (file.is_open()) {
+                    file << fullLog.dump() << std::endl;
+                }
             }
         }
-    }
-    return ERROR_SUCCESS;
+        return ERROR_SUCCESS;
+    };
 }
-
 int main() {
     setlocale(LC_ALL, "Russian");
 
