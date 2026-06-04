@@ -10,6 +10,19 @@
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ntdll.lib")
+#pragma comment(lib, "version.lib")
+
+
+/**
+ * @struct ProcessMetadata
+ * @brief Хранит детальную информацию о процессе для анализа. 
+ */
+struct ProcessMetadata {
+    std::wstring name;
+    std::wstring commandLine;
+    std::wstring companyName;
+};
+
 
 /**
  * @namespace ProcessMetrics
@@ -29,6 +42,9 @@ namespace ProcessMetrics {
         }
         return 0;
     }
+
+
+
 
     /**
      * @brief Получает счетчики ввода-вывода (I/O) процесса.
@@ -106,6 +122,86 @@ namespace ProcessMetrics {
         return 0;
     }
 
+    /**
+     * @brief Получает родительский PID для текущего процесса через Toolhelp32.
+     * @param pid PID процесса, для которого ищем родителя.
+     * @return DWORD Родительский PID (или 0, если не найден).
+     */
+    inline DWORD GetParentProcessId(DWORD pid) {
+        DWORD parentPid = 0;
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnapshot != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32 pe32;
+            pe32.dwSize = sizeof(PROCESSENTRY32);
+            if (Process32First(hSnapshot, &pe32)) {
+                do {
+                    if (pe32.th32ProcessID == pid) {
+                        parentPid = pe32.th32ParentProcessID;
+                        break;
+                    }
+                } while (Process32Next(hSnapshot, &pe32));
+            }
+            CloseHandle(hSnapshot);
+        }
+        return parentPid;
+    }
+
+    /**
+     * @brief Получает имя, командную строку и издателя процесса по его PID.
+     * @param pid Идентификатор процесса.
+     * @return ProcessMetadata Структура с собранными данными.
+     */
+    inline ProcessMetadata GetProcessDetails(DWORD pid) {
+        ProcessMetadata meta = { L"Unknown", L"", L"Unknown" };
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!hProcess) return meta;
+
+        wchar_t path[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageName(hProcess, 0, path, &size)) {
+            // Имя файла
+            std::wstring fullPath(path);
+            size_t lastSlash = fullPath.find_last_of(L"\\/");
+            meta.name = (lastSlash != std::wstring::npos) ? fullPath.substr(lastSlash + 1) : fullPath;
+
+            // Издатель (через версию файла)
+            DWORD dwHandle;
+            DWORD dwVerSize = GetFileVersionInfoSize(path, &dwHandle);
+            if (dwVerSize > 0) {
+                std::vector<BYTE> buffer(dwVerSize);
+                if (GetFileVersionInfo(path, 0, dwVerSize, buffer.data())) {
+                    struct LANGANDCODEPAGE { WORD wLanguage; WORD wCodePage; } *lpTranslate;
+                    UINT cbTranslate;
+                    if (VerQueryValue(buffer.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&lpTranslate, &cbTranslate)) {
+                        wchar_t subBlock[100];
+                        wsprintf(subBlock, L"\\StringFileInfo\\%04x%04x\\CompanyName", lpTranslate[0].wLanguage, lpTranslate[0].wCodePage);
+                        LPWSTR lpBuffer;
+                        UINT dwBytes;
+                        if (VerQueryValue(buffer.data(), subBlock, (LPVOID*)&lpBuffer, &dwBytes)) {
+                            meta.companyName = std::wstring(lpBuffer);
+                        }
+                    }
+                }
+            }
+        }
+        // Командная строка (через PEB)
+        ULONG_PTR pbi[6];
+        ULONG retLen;
+        if (NtQueryInformationProcess(hProcess, ProcessBasicInformation, &pbi, sizeof(pbi), &retLen) == 0) {
+            PEB peb;
+            if (ReadProcessMemory(hProcess, (LPCVOID)pbi[1], &peb, sizeof(peb), NULL)) {
+                RTL_USER_PROCESS_PARAMETERS params;
+                if (ReadProcessMemory(hProcess, (LPCVOID)peb.ProcessParameters, &params, sizeof(params), NULL)) {
+                    std::vector<wchar_t> buffer(params.CommandLine.Length / sizeof(wchar_t) + 1);
+                    if (ReadProcessMemory(hProcess, (LPCVOID)params.CommandLine.Buffer, buffer.data(), params.CommandLine.Length, NULL)) {
+                        meta.commandLine = std::wstring(buffer.data());
+                    }
+                }
+            }
+        }
+        CloseHandle(hProcess);
+        return meta;
+        }
 
 }
 
@@ -143,13 +239,19 @@ namespace LogEnricher {
                     pid, current_cpu, last_cpu_time, (long long)(current_cpu - last_cpu_time));
             }*/
 
-            j["metrics"]["private_bytes"] = ProcessMetrics::GetPrivateBytes(hProcess);
-            j["metrics"]["io"] = ProcessMetrics::GetIOCounters(hProcess);
+            j["metrics"]["private_bytes"] = ProcessMetrics::GetPrivateBytes(hProcess); ///< Количество частной памяти процесса?
+            j["metrics"]["io"] = ProcessMetrics::GetIOCounters(hProcess); ///< Количество ввода и вывода процесса в байтах?
 
-            j["metrics"]["thread_count"] = ProcessMetrics::GetThreadCount(pid);
-            j["metrics"]["handle_count"] = ProcessMetrics::GetHandleCount(hProcess);
+            j["metrics"]["thread_count"] = ProcessMetrics::GetThreadCount(pid); ///< текущее количество потоков процесса
+            j["metrics"]["handle_count"] = ProcessMetrics::GetHandleCount(hProcess); ///< количество открытых декскрипторов
 
-            // Считаем дельту (слайс)
+            ProcessMetadata meta = ProcessMetrics::GetProcessDetails(pid);
+            j["process_info"]["name"] = std::string(meta.name.begin(), meta.name.end());
+            j["process_info"]["company"] = std::string(meta.companyName.begin(), meta.companyName.end());
+            j["process_info"]["command_line"] = std::string(meta.commandLine.begin(), meta.commandLine.end());
+            j["parent_info"]["parent_pid"] = ProcessMetrics::GetParentProcessId(pid); ///< Родительский PID для текущего процесса
+
+            // Считаем дельту @todo это можно перенести в питон, а тут сохранять только время цп?
             if (last_cpu_time > 0 && current_cpu > last_cpu_time) {
                 j["metrics"]["cpu_slice"] = current_cpu - last_cpu_time;
             }
