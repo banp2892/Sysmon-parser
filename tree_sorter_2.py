@@ -6,41 +6,67 @@ from collections import defaultdict
 def parse_line(line):
     try:
         obj = json.loads(line)
-        xml = obj.get("data", "")
         
-        # Извлекаем GUIDы из XML
+        # 1. Извлекаем данные из переданных блоков
+        # Если в JSON уже есть готовые блоки, используем их, иначе — берем из корня
+        p_info = obj.get("process_info", obj) # fallback на случай если поля в корне
+        parent_info = obj.get("parent_info", obj)
+        metrics = obj.get("metrics", obj)
+        
+        # XML данные для GUID (все еще нужны для связи процессов)
+        xml = obj.get("data", "")
         guid_match = re.search(r"ProcessGuid['\"]?>\{([^}]+)\}", xml, re.IGNORECASE)
         parent_guid_match = re.search(r"ParentProcessGuid['\"]?>\{([^}]+)\}", xml, re.IGNORECASE)
         
-        guid = guid_match.group(1).lower() if guid_match else None
-        parent_guid = parent_guid_match.group(1).lower() if parent_guid_match else None
+        guid = guid_match.group(1).lower() if guid_match else obj.get("guid")
+        parent_guid = parent_guid_match.group(1).lower() if parent_guid_match else obj.get("parent_guid")
         
         if not guid: return None
-        
-        # Получаем новые данные из C++
-        p_info = obj.get("process_info", {})
-        parent_info = obj.get("parent_info", {})
         
         return {
             "guid": guid,
             "parent_guid": parent_guid,
-            "parent_pid": parent_info.get("parent_pid", 0),
-            "event_id": re.search(r'<EventID>(\d+)</EventID>', xml).group(1) if re.search(r'<EventID>(\d+)</EventID>', xml) else "0",
-            "metrics": obj.get("metrics", {}),
+            "event_id": str(obj.get("event_id", re.search(r'<EventID>(\d+)</EventID>', xml).group(1) if re.search(r'<EventID>(\d+)</EventID>', xml) else "0")),
             "timestamp": obj.get("timestamp", 0),
-            "name": p_info.get("name", get_clean_name(xml)), # Приоритет имени из C++
-            "company": p_info.get("company", "unknown"),
-            "cmd": p_info.get("command_line", "")
+            
+            # Разделение по блокам
+            "process_info": {
+                "name": get_clean_name(xml) if get_clean_name(xml) != "unknown" else p_info.get("name", "unknown"),
+                "company": p_info.get("company", "unknown"),
+                "cmd": p_info.get("command_line", p_info.get("cmd", ""))
+            },
+            "metrics": metrics,
+            "parent_info": {
+                "pid": parent_info.get("parent_pid", parent_info.get("pid", 0)),
+                "sid": parent_info.get("sid", ""),
+                "integrity": parent_info.get("integrity_level", 0),
+                "elevated": parent_info.get("is_elevated", False)
+            }
         }
-    except: return None
+    except Exception as e:
+        return None
 
 def get_clean_name(xml):
     image_match = re.search(r"Image'>([^<]+)</Data>", xml)
     return os.path.basename(image_match.group(1)) if image_match else "unknown"
 
+def get_reliable_name(info):
+    name = info['process_info'].get('name', 'unknown')
+    if name != "unknown" and name != "":
+        return name
+    # Попытка достать имя из командной строки, если name не задан
+    cmd = info['process_info'].get('cmd', '')
+    if cmd:
+        # Берем первый аргумент из кавычек или до первого пробела
+        match = re.search(r'"([^"]+)"|([^\s]+)', cmd)
+        if match:
+            path = match.group(1) or match.group(2)
+            return os.path.basename(path)
+    return "unknown"
+
 def create_folder_structure(guid, tree, current_path):
     info = tree[guid]
-    safe_name = re.sub(r'[\\/*?:"<>|]', "", info['name'])
+    safe_name = re.sub(r'[\\/*?:"<>|]', "", info['process_info']['name'])
     folder_name = f"{safe_name}_{guid[:8]}"
     path = os.path.join(current_path, folder_name)
     os.makedirs(path, exist_ok=True)
@@ -53,19 +79,46 @@ def create_folder_structure(guid, tree, current_path):
 
 def export_graph_to_file(tree, roots, output_path):
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("--- PROCESS HIERARCHY GRAPH ---\n")
+        f.write("--- PROCESS HIERARCHY SUMMARY ---\n\n")
+        
+        # Вспомогательная функция для подсчета всей ветки
+        def get_stats(guid):
+            info = tree[guid]
+            total_events = len(info["events"])
+            total_children = 0
+            total_dupes = info.get("duplicates", 0) # Считаем дубликаты в ветке
+            
+            for child in info["children"]:
+                child_events, child_count, child_dupes = get_stats(child)
+                total_events += child_events
+                total_children += (1 + child_count)
+                total_dupes += child_dupes
+            return total_events, total_children, total_dupes
+
         def write_node(guid, indent=0):
             info = tree[guid]
             prefix = "  " * indent
-            # Добавили вывод компании для визуализации
-            company = info.get("company", "unknown")
-            f.write(f"{prefix}{info['name']}_{guid[:8]} [{company}] (Events: {len(info['events'])})\n")
+            
+            name = get_reliable_name(info)
+            total_events, total_children, total_dupes = get_stats(guid)
+
+
+            
+            
+            sec = info.get("parent_security", {})
+            
+            is_admin = " [ADMIN]" if sec.get("elevated") else " [USER]"
+            integrity = sec.get("integrity", 0)
+            
+            stats_str = f"Events: {len(info['events'])} (local), {total_dupes} ignored, {total_children} children"
+            f.write(f"{prefix}|- {name}_{guid[:12]} {is_admin} (Int: {integrity}) | {stats_str}\n")
+            
             for child in info["children"]:
                 write_node(child, indent + 1)
         
         for root in roots:
             write_node(root)
-    print(f"Граф визуализации записан в: {output_path}")
+    print(f"Подробный отчет записан в: {output_path}")
 
 def main():
     path = input("Путь до файла: ").strip().replace('"', '')
@@ -75,26 +128,38 @@ def main():
         lines = f.readlines()
 
     processes = {}
+    total_lines = len(lines)
+    duplicate_count = 0  # Счётчик удаленных дубликатов
+
     for line in lines:
         data = parse_line(line)
-        if not data: continue
+        if not data: 
+            continue
         
         guid = data["guid"]
         if guid not in processes:
             processes[guid] = {
                 "events": [], 
-                "name": data["name"], 
-                "company": data["company"],
-                "cmd": data["cmd"],
-                "parent_guid": data["parent_guid"], 
-                "children": []
+                "process_info": data["process_info"],
+                "parent_guid": data["parent_guid"],
+                "parent_security": data["parent_info"],
+                "children": [],
+                "duplicates": 0
             }
         
-        # Дедупликация событий внутри процесса
-        if not processes[guid]["events"] or (processes[guid]["events"][-1]["event_id"] != data["event_id"]):
+        # Дедупликация событий
+        if processes[guid]["events"] and processes[guid]["events"][-1]["event_id"] == data["event_id"]:
+            duplicate_count += 1
+            processes[guid]["duplicates"] += 1
+        else:
             processes[guid]["events"].append(data)
 
-    # Строим дерево
+    # Вывод статистики в консоль
+    print(f"\n--- СТАТИСТИКА ---")
+    print(f"Всего обработано строк: {total_lines}")
+    print(f"Дубликатов удалено: {duplicate_count}")
+    print(f"Уникальных событий сохранено: {total_lines - duplicate_count}")
+
     tree = processes
     roots = []
     for guid, info in tree.items():
@@ -104,15 +169,17 @@ def main():
         else:
             roots.append(guid)
 
-    print(f"Найдено корневых процессов: {len(roots)}")
-    
-    # Запись результатов
     root_dir = os.path.splitext(os.path.basename(path))[0] + "_tree"
-    for root_guid in roots:
-        create_folder_structure(root_guid, tree, root_dir)
-    
-    export_graph_to_file(tree, roots, os.path.join(root_dir, "process_tree_graph.txt"))
-    print(f"Готово! Результат в папке: {root_dir}")
+    # Создаем папку, если вдруг roots пустой
+    if roots:
+        os.makedirs(root_dir, exist_ok=True)
+        for root_guid in roots:
+            create_folder_structure(root_guid, tree, root_dir)
+        
+        export_graph_to_file(tree, roots, os.path.join(root_dir, "process_tree_graph.txt"))
+        print(f"Готово! Результаты в папке: {root_dir}")
+    else:
+        print("Ошибка: Корневые процессы не найдены.")
 
 if __name__ == "__main__":
     main()

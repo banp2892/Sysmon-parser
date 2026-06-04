@@ -7,6 +7,7 @@
 #include <chrono>
 #include <tlhelp32.h>
 #include <cstdint>
+#include <sddl.h>
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ntdll.lib")
@@ -23,6 +24,27 @@ struct ProcessMetadata {
     std::wstring companyName;
 };
 
+/**
+ * @struct ParentProcessInfo
+ * @brief Полная информация о родительском процессе, включая права доступа и метаданные.
+ */
+struct ParentProcessInfo {
+    DWORD pid;                       ///< Идентификатор процесса (PID) родителя
+    std::wstring name;               ///< Имя исполняемого файла процесса
+    std::wstring commandLine;        ///< Строка аргументов командной строки
+    std::wstring sid;                ///< Строковое представление SID владельца процесса
+    DWORD integrityLevel;            ///< Уровень целостности (1:Low, 2:Medium, 3:High, 4:System)
+    bool isElevated;                 ///< Флаг повышения прав (true, если запущен от имени администратора)
+
+    /**
+     * @brief Конструктор по умолчанию.
+     * @param pPid PID родительского процесса.
+     */
+    ParentProcessInfo(DWORD pPid = 0)
+        : pid(pPid), name(L"Unknown"), commandLine(L""),
+        sid(L""), integrityLevel(0), isElevated(false) {
+    }
+};
 
 /**
  * @namespace ProcessMetrics
@@ -147,6 +169,67 @@ namespace ProcessMetrics {
     }
 
     /**
+     * @brief Получает полную информацию о родительском процессе по его PID.
+     * @param parentPid PID родительского процесса.
+     * @return ParentProcessInfo Структура с собранными данными.
+     */
+    inline ParentProcessInfo GetParentDetails(DWORD parentPid) {
+        ParentProcessInfo info(parentPid);
+
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, parentPid);
+        if (!hProcess) return info;
+
+        // 1. Получаем имя и командную строку (используем уже написанную логику)
+        wchar_t path[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageName(hProcess, 0, path, &size)) {
+            std::wstring fullPath(path);
+            size_t lastSlash = fullPath.find_last_of(L"\\/");
+            info.name = (lastSlash != std::wstring::npos) ? fullPath.substr(lastSlash + 1) : fullPath;
+            // Командную строку можно извлечь через NtQueryInformationProcess здесь...
+        }
+
+        // 2. Получаем токен для прав безопасности
+        HANDLE hToken;
+        if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
+            // SID
+            DWORD dwSize = 0;
+            GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize);
+            std::vector<BYTE> buffer(dwSize);
+            PTOKEN_USER pTokenUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
+            if (GetTokenInformation(hToken, TokenUser, pTokenUser, dwSize, &dwSize)) {
+                LPWSTR sidString = NULL;
+                if (ConvertSidToStringSid(pTokenUser->User.Sid, &sidString)) {
+                    info.sid = sidString;
+                    LocalFree(sidString);
+                }
+            }
+
+            // Integrity Level
+            GetTokenInformation(hToken, TokenIntegrityLevel, buffer.data(), dwSize, &dwSize);
+            PTOKEN_MANDATORY_LABEL pLabel = reinterpret_cast<PTOKEN_MANDATORY_LABEL>(buffer.data());
+            DWORD subAuth = *GetSidSubAuthority(pLabel->Label.Sid, 0);
+            if (subAuth == SECURITY_MANDATORY_LOW_RID) info.integrityLevel = 1;
+            else if (subAuth == SECURITY_MANDATORY_MEDIUM_RID) info.integrityLevel = 2;
+            else if (subAuth == SECURITY_MANDATORY_HIGH_RID) info.integrityLevel = 3;
+            else if (subAuth == SECURITY_MANDATORY_SYSTEM_RID) info.integrityLevel = 4;
+
+            // Elevation
+            TOKEN_ELEVATION elevation;
+            DWORD retSize;
+            if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &retSize)) {
+                info.isElevated = (elevation.TokenIsElevated != 0);
+            }
+
+            CloseHandle(hToken);
+        }
+
+        CloseHandle(hProcess);
+        return info;
+    }
+
+
+    /**
      * @brief Получает имя, командную строку и издателя процесса по его PID.
      * @param pid Идентификатор процесса.
      * @return ProcessMetadata Структура с собранными данными.
@@ -249,7 +332,18 @@ namespace LogEnricher {
             j["process_info"]["name"] = std::string(meta.name.begin(), meta.name.end());
             j["process_info"]["company"] = std::string(meta.companyName.begin(), meta.companyName.end());
             j["process_info"]["command_line"] = std::string(meta.commandLine.begin(), meta.commandLine.end());
-            j["parent_info"]["parent_pid"] = ProcessMetrics::GetParentProcessId(pid); ///< Родительский PID для текущего процесса
+
+            DWORD pPid = ProcessMetrics::GetParentProcessId(pid);
+            ParentProcessInfo pInfo = ProcessMetrics::GetParentDetails(pPid);
+
+            j["parent_info"] = {
+            {"pid", pInfo.pid},
+            {"name", std::string(pInfo.name.begin(), pInfo.name.end())},
+            {"sid", std::string(pInfo.sid.begin(), pInfo.sid.end())},
+            {"integrity_level", pInfo.integrityLevel},
+            {"is_elevated", pInfo.isElevated}
+            };
+
 
             // Считаем дельту @todo это можно перенести в питон, а тут сохранять только время цп?
             if (last_cpu_time > 0 && current_cpu > last_cpu_time) {
