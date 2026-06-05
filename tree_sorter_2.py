@@ -67,7 +67,8 @@ def get_reliable_name(info):
 def create_folder_structure(guid, tree, current_path):
     info = tree[guid]
     safe_name = re.sub(r'[\\/*?:"<>|]', "", info['process_info']['name'])
-    folder_name = f"{safe_name}_{guid[:8]}"
+    # Убрали [:8], теперь имя папки содержит полный GUID
+    folder_name = f"{safe_name}_{guid}"
     path = os.path.join(current_path, folder_name)
     os.makedirs(path, exist_ok=True)
     
@@ -132,27 +133,39 @@ def main():
     duplicate_count = 0  # Счётчик удаленных дубликатов
 
     for line in lines:
-        data = parse_line(line)
-        if not data: 
-            continue
-        
-        guid = data["guid"]
-        if guid not in processes:
-            processes[guid] = {
-                "events": [], 
-                "process_info": data["process_info"],
-                "parent_guid": data["parent_guid"],
-                "parent_security": data["parent_info"],
-                "children": [],
-                "duplicates": 0
-            }
-        
-        # Дедупликация событий
-        if processes[guid]["events"] and processes[guid]["events"][-1]["event_id"] == data["event_id"]:
-            duplicate_count += 1
-            processes[guid]["duplicates"] += 1
-        else:
-            processes[guid]["events"].append(data)
+            data = parse_line(line)
+            if not data: 
+                continue
+            
+            guid = data["guid"]
+            if guid not in processes:
+                processes[guid] = {
+                    "events": [], 
+                    "process_info": data["process_info"],
+                    "parent_guid": data["parent_guid"],
+                    "parent_security": data["parent_info"],
+                    "children": [],
+                    "duplicates": 0,
+                    # Инициализируем ключи для сравнения
+                    "last_event_signature": None,
+                    "current_copy_count": 0 
+                }
+                processes[guid]["last_event_obj"] = None
+            
+            event_signature = (data["event_id"], json.dumps(data["process_info"], sort_keys=True))
+
+            if processes[guid]["last_event_signature"] == event_signature:
+                # Обновляем счетчик дубликатов для уже сохраненного объекта
+                processes[guid]["last_event_obj"]["copy"] += 1
+                processes[guid]["duplicates"] += 1
+                duplicate_count += 1
+            else:
+                # Это новое уникальное событие
+                data["copy"] = 0 # Сбрасываем в 0 при создании
+                processes[guid]["last_event_signature"] = event_signature
+                processes[guid]["last_event_obj"] = data # Запоминаем ссылку
+                processes[guid]["events"].append(data)
+
 
     # Вывод статистики в консоль
     print(f"\n--- СТАТИСТИКА ---")

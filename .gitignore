@@ -363,3 +363,4 @@ MigrationBackup/
 FodyWeavers.xsd
 *sysmon_log*
 *data
+.vscode/
