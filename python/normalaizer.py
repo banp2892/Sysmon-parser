@@ -19,50 +19,57 @@ def classify_path(cmd):
     return 4
 
 def prepare_process_sequence(events):
-    # УБРАЛИ: events = sorted(events, key=lambda x: x['timestamp'])
     sequence = []
     
-    # Чтобы дельта считалась корректно, нам нужно знать состояние на начало
-    # Инициализируем первым событием
     prev_time = events[0]['timestamp']
-    prev_io_read = events[0].get('metrics', {}).get('io', {}).get('read_bytes', 0)
-    prev_io_write = events[0].get('metrics', {}).get('io', {}).get('write_bytes', 0)
+    prev_io = events[0].get('metrics', {}).get('io', {})
+    prev_io_read = prev_io.get('read_bytes', 0)
+    prev_io_write = prev_io.get('write_bytes', 0)
     
     for i, e in enumerate(events):
-        # 1. Время между событиями
+        # Вычисляем дельты
         delta_time = e['timestamp'] - prev_time
-        
-        # 2. Дельта байт (считаем разницу с предыдущим, если это не первое событие)
         io = e.get('metrics', {}).get('io', {})
-        current_read = io.get('read_bytes', 0)
-        current_write = io.get('write_bytes', 0)
+        curr_read = io.get('read_bytes', 0)
+        curr_write = io.get('write_bytes', 0)
         
-        delta_read = current_read - prev_io_read if i > 0 else 0
-        delta_write = current_write - prev_io_write if i > 0 else 0
+        delta_read = curr_read - prev_io_read if i > 0 else 0
+        delta_write = curr_write - prev_io_write if i > 0 else 0
         
-        # 3. Энтропия и классификация (оставляем как есть)
-        ent_cmd = shannon_entropy(e['process_info'].get('cmd', ''))
-        ent_p_cmd = shannon_entropy(e['parent_info'].get('cmd', ''))
-        path_cat = classify_path(e['process_info'].get('cmd', ''))
-        
+        # Вектор признаков БЕЗ идентификаторов и имен
         features = {
-            "timestamp": e['timestamp'],
+            # Признаки времени и событий
             "event_id": int(e['event_id']),
             "delta_time": delta_time,
+            
+            # Признаки активности (IO + CPU)
             "delta_read": max(0, delta_read),
             "delta_write": max(0, delta_write),
-            "cpu_slice": e['metrics'].get('cpu_slice', 0),
-            "ent_cmd": ent_cmd,
-            "ent_p_cmd": ent_p_cmd,
-            "path_cat": path_cat
+            "cpu_slice": e.get('metrics', {}).get('cpu_slice', 0),
+            "raw_cpu": e.get('metrics', {}).get('_raw_cpu', 0),
+            
+            # Признаки нагрузки на систему
+            "handle_count": e.get('metrics', {}).get('handle_count', 0),
+            "private_bytes": e.get('metrics', {}).get('private_bytes', 0),
+            "thread_count": e.get('metrics', {}).get('thread_count', 0),
+            
+            # Признаки поведения командной строки (энтропия, а не сам текст!)
+            "ent_cmd": shannon_entropy(e.get('process_info', {}).get('cmd', '')),
+            "ent_p_cmd": shannon_entropy(e.get('parent_info', {}).get('cmd', '')),
+            "path_cat": classify_path(e.get('process_info', {}).get('cmd', '')),
+            
+            # Контекст запуска (бинарные флаги)
+            "p_integrity": e.get('parent_info', {}).get('integrity', 0),
+            "p_elevated": 1 if e.get('parent_info', {}).get('elevated') else 0,
+            "anomaly": 1 if e.get('anomaly') else 0,
+            "copy": e.get('copy', 0)
         }
         
         sequence.append(features)
         
-        # Обновляем для след. итерации
         prev_time = e['timestamp']
-        prev_io_read = current_read
-        prev_io_write = current_write
+        prev_io_read = curr_read
+        prev_io_write = curr_write
         
     return sequence
 
@@ -131,8 +138,6 @@ def main():
                 
                 # Добавление в мастер-лог
                 for item in proc_features:
-                    item['process_name'] = proc_name
-                    item['guid'] = guid
                     master_log.append(item)
                     
             except Exception as e:
