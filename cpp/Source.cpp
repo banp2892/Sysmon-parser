@@ -10,6 +10,7 @@
 #include <winevt.h>
 #include "SysmonCollector.h"
 #include "LogEnricher.h"
+#include <shlobj.h> ///< Для проверки запуска программы от имени администратора
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -95,6 +96,11 @@ bool EnableDebugPrivilege() {
 int main() {
     setlocale(LC_ALL, "Russian");
 
+    if (!IsUserAnAdmin()) {
+        std::cout << "[-] FAILED: Run as Administarator." << std::endl;
+        return 1;
+    }
+
     // Подготовка среды
     if (!fs::exists("data")) fs::create_directory("data");
 
@@ -106,7 +112,7 @@ int main() {
         L"*", NULL, NULL, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
-        std::cerr << "[-] Failed: Failed subscribe to Sysmon." << std::endl;
+        std::cerr << "[-] FAILED: Failed subscribe to Sysmon." << std::endl;
         return 1;
     }
 

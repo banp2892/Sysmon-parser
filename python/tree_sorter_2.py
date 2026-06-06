@@ -38,9 +38,11 @@ def parse_line(line):
             "metrics": metrics,
             "parent_info": {
                 "pid": parent_info.get("parent_pid", parent_info.get("pid", 0)),
-                "sid": parent_info.get("sid", ""),
                 "integrity": parent_info.get("integrity_level", 0),
-                "elevated": parent_info.get("is_elevated", False)
+                "elevated": parent_info.get("is_elevated", False),
+            
+                "start_time": parent_info.get("parent_start_time", 0),
+                "is_service": parent_info.get("is_service", False)
             }
         }
     except Exception as e:
@@ -102,17 +104,21 @@ def export_graph_to_file(tree, roots, output_path):
             
             name = get_reliable_name(info)
             total_events, total_children, total_dupes = get_stats(guid)
-
-
-            
-            
             sec = info.get("parent_security", {})
+            
+            # Проверяем, есть ли хотя бы одно событие с аномалией в списке events этого процесса
+            is_anomaly = any(ev.get("anomaly") == "SUSPICIOUS_SERVICE_ACTIVITY" for ev in info["events"])
+            anomaly_tag = " [!!! АНОМАЛИЯ]" if is_anomaly else ""
+            service_tag = " [SVC]" if sec.get("is_service") else ""
+            # ------------------------
             
             is_admin = " [ADMIN]" if sec.get("elevated") else " [USER]"
             integrity = sec.get("integrity", 0)
             
             stats_str = f"Events: {len(info['events'])} (local), {total_dupes} ignored, {total_children} children"
-            f.write(f"{prefix}|- {name}_{guid[:12]} {is_admin} (Int: {integrity}) | {stats_str}\n")
+            
+            # Добавляем теги в строку вывода
+            f.write(f"{prefix}|- {name}_{guid[:12]}{service_tag}{anomaly_tag} {is_admin} (Int: {integrity}) | {stats_str}\n")
             
             for child in info["children"]:
                 write_node(child, indent + 1)
@@ -137,7 +143,13 @@ def main():
             if not data: 
                 continue
             
+
+
+
+
             guid = data["guid"]
+            p_guid = data["parent_guid"]
+            data["anomaly"] = None
             if guid not in processes:
                 processes[guid] = {
                     "events": [], 
@@ -152,6 +164,18 @@ def main():
                 }
                 processes[guid]["last_event_obj"] = None
             
+
+            if p_guid in processes:
+                parent = processes[p_guid]
+                # Допустим, событие создания дочернего процесса имеет временную метку
+                child_time = data["timestamp"]
+                parent_start = data["parent_info"].get("start_time", 0)
+                
+                # Если служба запустила процесс менее чем через 5 секунд после своего старта
+                if data["parent_info"].get("is_service") and (0 < child_time - parent_start < 5):
+                    data["anomaly"] = "SUSPICIOUS_SERVICE_ACTIVITY"
+
+
             event_signature = (data["event_id"], json.dumps(data["process_info"], sort_keys=True))
 
             if processes[guid]["last_event_signature"] == event_signature:

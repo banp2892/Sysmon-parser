@@ -35,6 +35,8 @@ struct ParentProcessInfo {
     std::wstring sid;                ///< Строковое представление SID владельца процесса
     DWORD integrityLevel;            ///< Уровень целостности (1:Low, 2:Medium, 3:High, 4:System)
     bool isElevated;                 ///< Флаг повышения прав (true, если запущен от имени администратора)
+    uint64_t startTime;              ///< Время запуска родителя (Unix Timestamp)
+    bool isService;                  ///< Признак того, что процесс является системной службой
 
     /**
      * @brief Конструктор по умолчанию.
@@ -42,7 +44,8 @@ struct ParentProcessInfo {
      */
     ParentProcessInfo(DWORD pPid = 0)
         : pid(pPid), name(L"Unknown"), commandLine(L""),
-        sid(L""), integrityLevel(0), isElevated(false) {
+        sid(L""), integrityLevel(0), isElevated(false),
+        startTime(0), isService(false) {
     }
 };
 
@@ -189,7 +192,23 @@ namespace ProcessMetrics {
             // Командную строку можно извлечь через NtQueryInformationProcess здесь...
         }
 
-        // 2. Получаем токен для прав безопасности
+        // 2. Получаем время запуска
+        FILETIME creation, exit, kernel, user;
+        if (GetProcessTimes(hProcess, &creation, &exit, &kernel, &user)) {
+            uint64_t intervals = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+            info.startTime = (intervals / 10000000ULL) - 11644473600ULL;
+        }
+
+        // 3. Проверка на службу (Parent_Is_Service)
+        DWORD sessionId = 0;
+        if (ProcessIdToSessionId(parentPid, &sessionId)) {
+            // Службы чаще всего работают в Session 0
+            if (sessionId == 0) {
+                info.isService = true;
+            }
+        }
+
+        // 4. Получаем токен для прав безопасности
         HANDLE hToken;
         if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
             // SID
@@ -341,7 +360,9 @@ namespace LogEnricher {
             {"name", std::string(pInfo.name.begin(), pInfo.name.end())},
             {"sid", std::string(pInfo.sid.begin(), pInfo.sid.end())},
             {"integrity_level", pInfo.integrityLevel},
-            {"is_elevated", pInfo.isElevated}
+            {"is_elevated", pInfo.isElevated},
+            {"parent_start_time", pInfo.startTime },
+            { "is_service", pInfo.isService }
             };
 
 
