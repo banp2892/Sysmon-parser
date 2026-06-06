@@ -182,24 +182,35 @@ namespace ProcessMetrics {
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, parentPid);
         if (!hProcess) return info;
 
-        // 1. Получаем имя и командную строку (используем уже написанную логику)
+        // Получаем имя 
         wchar_t path[MAX_PATH];
         DWORD size = MAX_PATH;
         if (QueryFullProcessImageName(hProcess, 0, path, &size)) {
             std::wstring fullPath(path);
             size_t lastSlash = fullPath.find_last_of(L"\\/");
             info.name = (lastSlash != std::wstring::npos) ? fullPath.substr(lastSlash + 1) : fullPath;
-            // Командную строку можно извлечь через NtQueryInformationProcess здесь...
+
+        }
+        // Получаем коммандную строку родителя
+        ULONG returnLength;
+        NtQueryInformationProcess(hProcess, (PROCESSINFOCLASS)60, NULL, 0, &returnLength);
+        if (returnLength > 0) {
+            std::vector<BYTE> buffer(returnLength);
+            if (NtQueryInformationProcess(hProcess, (PROCESSINFOCLASS)60, buffer.data(), returnLength, &returnLength) == 0) {
+                PUNICODE_STRING pCmdLine = (PUNICODE_STRING)buffer.data();
+                info.commandLine = std::wstring(pCmdLine->Buffer, pCmdLine->Length / sizeof(wchar_t));
+            }
         }
 
-        // 2. Получаем время запуска
+
+        // Получаем время запуска
         FILETIME creation, exit, kernel, user;
         if (GetProcessTimes(hProcess, &creation, &exit, &kernel, &user)) {
             uint64_t intervals = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
             info.startTime = (intervals / 10000000ULL) - 11644473600ULL;
         }
 
-        // 3. Проверка на службу (Parent_Is_Service)
+        // Проверка на службу (Parent_Is_Service)
         DWORD sessionId = 0;
         if (ProcessIdToSessionId(parentPid, &sessionId)) {
             // Службы чаще всего работают в Session 0
@@ -208,7 +219,7 @@ namespace ProcessMetrics {
             }
         }
 
-        // 4. Получаем токен для прав безопасности
+        // Получаем токен для прав безопасности
         HANDLE hToken;
         if (OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) {
             // SID

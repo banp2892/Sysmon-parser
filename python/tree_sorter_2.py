@@ -38,9 +38,10 @@ def parse_line(line):
             "metrics": metrics,
             "parent_info": {
                 "pid": parent_info.get("parent_pid", parent_info.get("pid", 0)),
+                "name": parent_info.get("name", "unknown"),
+                "cmd": parent_info.get("command_line", ""),
                 "integrity": parent_info.get("integrity_level", 0),
                 "elevated": parent_info.get("is_elevated", False),
-            
                 "start_time": parent_info.get("parent_start_time", 0),
                 "is_service": parent_info.get("is_service", False)
             }
