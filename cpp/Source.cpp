@@ -99,18 +99,18 @@ int main() {
     if (!fs::exists("data")) fs::create_directory("data");
 
     if (!EnableDebugPrivilege()) {
-        std::cerr << "[-] ВНИМАНИЕ: Запустите от имени Администратора для доступа ко всем процессам." << std::endl;
+        std::cerr << "[-] Run as Administarator to get access for all process." << std::endl;
     }
 
     EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational",
         L"*", NULL, NULL, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
-        std::cerr << "[-] ОШИБКА: Не удалось подписаться на Sysmon. Проверьте, установлен ли он." << std::endl;
+        std::cerr << "[-] Failed: Failed subscribe to Sysmon." << std::endl;
         return 1;
     }
 
-    std::cout << "[+] Мониторинг запущен. Данные сохраняются в папку /data" << std::endl;
+    std::cout << "[+] Monitoring has been started. The data will be saved in /data" << std::endl;
     Sleep(INFINITE);
 
     EvtClose(hSub);
