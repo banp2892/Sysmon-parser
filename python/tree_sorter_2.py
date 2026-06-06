@@ -39,7 +39,7 @@ def parse_line(line):
             "parent_info": {
                 "pid": parent_info.get("parent_pid", parent_info.get("pid", 0)),
                 "name": parent_info.get("name", "unknown"),
-                "cmd": parent_info.get("command_line", ""),
+                "cmd": parent_info.get("command_line", ""), # Добавляем cmd родителя
                 "integrity": parent_info.get("integrity_level", 0),
                 "elevated": parent_info.get("is_elevated", False),
                 "start_time": parent_info.get("parent_start_time", 0),
