@@ -8,20 +8,24 @@
 #include <tlhelp32.h>
 #include <cstdint>
 #include <sddl.h>
+#include <wintrust.h>
+#include <softpub.h>
+
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ntdll.lib")
 #pragma comment(lib, "version.lib")
-
+#pragma comment(lib, "wintrust.lib")
 
 /**
  * @struct ProcessMetadata
  * @brief Хранит детальную информацию о процессе для анализа. 
  */
 struct ProcessMetadata {
-    std::wstring name;
-    std::wstring commandLine;
-    std::wstring companyName;
+    std::wstring name;               ///< Имя процесса
+    std::wstring commandLine;        ///< Строка аргументов командной строки
+    std::wstring companyName;        ///< Имя компании, чья подпись стоит на процессе
+    bool isSigned;                   ///< Флаг, подтверждающий наличие валидной цифровой подписи
 };
 
 /**
@@ -37,6 +41,7 @@ struct ParentProcessInfo {
     bool isElevated;                 ///< Флаг повышения прав (true, если запущен от имени администратора)
     uint64_t startTime;              ///< Время запуска родителя (Unix Timestamp)
     bool isService;                  ///< Признак того, что процесс является системной службой
+    bool isSigned;                   ///< Флаг, подтверждающий наличие валидной цифровой подписи
 
     /**
      * @brief Конструктор по умолчанию.
@@ -45,7 +50,7 @@ struct ParentProcessInfo {
     ParentProcessInfo(DWORD pPid = 0)
         : pid(pPid), name(L"Unknown"), commandLine(L""),
         sid(L""), integrityLevel(0), isElevated(false),
-        startTime(0), isService(false) {
+        startTime(0), isService(false), isSigned(false) {
     }
 };
 
@@ -108,6 +113,33 @@ namespace ProcessMetrics {
         }
         return 0;
     }
+
+    /**
+     * @brief Проверяет наличие валидной цифровой подписи у файла.
+     */
+    inline bool IsFileSigned(const std::wstring& filePath) {
+        if (filePath.empty()) return false;
+        WINTRUST_FILE_INFO fileInfo = { 0 };
+        fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+        fileInfo.pcwszFilePath = filePath.c_str();
+
+        WINTRUST_DATA trustData = { 0 };
+        trustData.cbStruct = sizeof(WINTRUST_DATA);
+        trustData.dwUIChoice = WTD_UI_NONE;
+        trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trustData.dwUnionChoice = WTD_CHOICE_FILE;
+        trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+        trustData.pFile = &fileInfo;
+
+        GUID guidAction = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        LONG result = WinVerifyTrust(NULL, &guidAction, &trustData);
+
+        trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(NULL, &guidAction, &trustData);
+
+        return (result == ERROR_SUCCESS);
+    }
+
 
     /**
     * @brief Получает текущее количество потоков процесса по его PID.
@@ -202,6 +234,10 @@ namespace ProcessMetrics {
             }
         }
 
+        // Проверяем цифорвую подпись
+        if (QueryFullProcessImageName(hProcess, 0, path, &size)) {
+            info.isSigned = ProcessMetrics::IsFileSigned(path);
+        }
 
         // Получаем время запуска
         FILETIME creation, exit, kernel, user;
@@ -265,7 +301,7 @@ namespace ProcessMetrics {
      * @return ProcessMetadata Структура с собранными данными.
      */
     inline ProcessMetadata GetProcessDetails(DWORD pid) {
-        ProcessMetadata meta = { L"Unknown", L"", L"Unknown" };
+        ProcessMetadata meta = { L"Unknown", L"", L"Unknown", false };
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
         if (!hProcess) return meta;
 
@@ -312,9 +348,18 @@ namespace ProcessMetrics {
                 }
             }
         }
+
+        // Проверка на подпись
+        if (QueryFullProcessImageName(hProcess, 0, path, &size)) {
+            meta.isSigned = ProcessMetrics::IsFileSigned(path);
+        }
+
         CloseHandle(hProcess);
         return meta;
         }
+
+    
+
 
 }
 
@@ -362,6 +407,7 @@ namespace LogEnricher {
             j["process_info"]["name"] = std::string(meta.name.begin(), meta.name.end());
             j["process_info"]["company"] = std::string(meta.companyName.begin(), meta.companyName.end());
             j["process_info"]["command_line"] = std::string(meta.commandLine.begin(), meta.commandLine.end());
+            j["process_info"] ["is_signed"] = meta.isSigned;
 
             DWORD pPid = ProcessMetrics::GetParentProcessId(pid);
             ParentProcessInfo pInfo = ProcessMetrics::GetParentDetails(pPid);
@@ -373,7 +419,8 @@ namespace LogEnricher {
             {"integrity_level", pInfo.integrityLevel},
             {"is_elevated", pInfo.isElevated},
             {"parent_start_time", pInfo.startTime },
-            { "is_service", pInfo.isService }
+            { "is_service", pInfo.isService },
+            {"is_signed", pInfo.isSigned}
             };
 
 

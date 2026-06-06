@@ -33,7 +33,8 @@ def parse_line(line):
             "process_info": {
                 "name": get_clean_name(xml) if get_clean_name(xml) != "unknown" else p_info.get("name", "unknown"),
                 "company": p_info.get("company", "unknown"),
-                "cmd": p_info.get("command_line", p_info.get("cmd", ""))
+                "cmd": p_info.get("command_line", p_info.get("cmd", "")),
+                "isSigned": p_info.get("is_signed", False)
             },
             "metrics": metrics,
             "parent_info": {
@@ -43,7 +44,8 @@ def parse_line(line):
                 "integrity": parent_info.get("integrity_level", 0),
                 "elevated": parent_info.get("is_elevated", False),
                 "start_time": parent_info.get("parent_start_time", 0),
-                "is_service": parent_info.get("is_service", False)
+                "is_service": parent_info.get("is_service", False),
+                "isSigned": parent_info.get("is_signed", False)
             }
         }
     except Exception as e:
