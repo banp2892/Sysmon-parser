@@ -7,6 +7,8 @@
 #include <thread>
 #include <iomanip>
 
+#include <map>
+
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
 
