@@ -11,6 +11,8 @@
 #include "SysmonCollector.h"
 #include "LogEnricher.h"
 #include <shlobj.h> ///< Для проверки запуска программы от имени администратора
+#include <iomanip>
+#include <sstream>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -37,6 +39,22 @@ std::string GetFilePath() {
 }
 
 
+std::string FileTimeToReadable(const FILETIME& ft) {
+    SYSTEMTIME st;
+    if (!FileTimeToSystemTime(&ft, &st)) return "Invalid Time";
+
+    std::stringstream ss;
+    ss << st.wYear << "-"
+        << std::setw(2) << std::setfill('0') << st.wMonth << "-"
+        << std::setw(2) << std::setfill('0') << st.wDay << " "
+        << std::setw(2) << std::setfill('0') << st.wHour << ":"
+        << std::setw(2) << std::setfill('0') << st.wMinute << ":"
+        << std::setw(2) << std::setfill('0') << st.wSecond;
+    return ss.str();
+}
+
+
+
 /**
 * @brief Функция, принимающая лог Sysmon и обрабатывающая его обогащение и сохранение
 */
@@ -50,7 +68,7 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
         return ERROR_SUCCESS;
     }
 
-    SysmonCollector::StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
+    StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
 
 
     DWORD pid = StaticSysmon.ProcessId;
@@ -65,70 +83,83 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
        
 
 
-        //mapPtr->UpdateData(Guid, pid, )
+        mapPtr->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
+
+        if (mapPtr->size() % 5 == 0) {
+            // Оставляем флаг, чтобы в логе сразу видеть, если время "нулевое"
+            bool isTimeInvalid = (StaticSysmon.createTime.dwLowDateTime == 0 &&
+                StaticSysmon.createTime.dwHighDateTime == 0);
+
+            std::cout << "[DEBUG] Size: " << mapPtr->size()
+                << " | PID: " << pid
+                << " | Eventid: " << eventId
+                << " | UtcTime: " << (StaticSysmon.UtcTime.empty() ? "EMPTY" : StaticSysmon.UtcTime)
+                << " | CreateTime: " << (isTimeInvalid ? "INVALID" : FileTimeToReadable(StaticSysmon.createTime))
+                << " | Image: " << StaticSysmon.Image
+                << std::endl;
+        }
     }
     
-    SysmonCollector::ProcessMetadata_2 ThisData;
-    mapPtr->TryGet(Guid, ThisData);
 
 
-    if (eventId == 5) {
-        std::lock_guard<std::mutex> lock(g_CacheMutex);
-        g_ProcessCache.erase(pid);
-    }
-    else {
-        uint64_t last_cpu = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_CacheMutex);
-            last_cpu = g_ProcessCache[pid].last_cpu_time;
-        }
 
-        // Обогащаем
-        json fullLog = LogEnricher::Enrich(xml, pid, last_cpu);
-        uint64_t startTime = 0;
-        std::string procName = "";
+    //if (eventId == 5) {
+    //    std::lock_guard<std::mutex> lock(g_CacheMutex);
+    //    g_ProcessCache.erase(pid);
+    //}
+    //else {
+    //    uint64_t last_cpu = 0;
+    //    {
+    //        std::lock_guard<std::mutex> lock(g_CacheMutex);
+    //        last_cpu = g_ProcessCache[pid].last_cpu_time;
+    //    }
 
-
-        // 1. Проверяем, существует ли вообще ключ process_info
-        if (fullLog.contains("process_info") && fullLog["process_info"].is_object()) {
-
-            // 2. Получаем данные безопасно
-            auto& info = fullLog["process_info"];
-
-            // Используем тот ключ, который вы реально записали в Enrich (стандартно у нас start_time)
-            startTime = info.value("start_time", 0ULL);
-            procName = info.value("name", "Unknown");
-
-        }
-        else {
-            // Если ключа нет, выводим ошибку в консоль, чтобы понять, что не так
-            std::cerr << "[!] Debug: process_info key missing in log: " << fullLog.dump() << std::endl;
-        }
-        // вот если я убираю эти строчки, то перестает падать, дел в них
-        // Обновляем кэш, если данные получены успешно
-        if (fullLog.contains("metrics") && fullLog["metrics"].contains("_raw_cpu")) {
-            std::lock_guard<std::mutex> lock(g_CacheMutex);
-            g_ProcessCache[pid].last_cpu_time = fullLog["metrics"]["_raw_cpu"].get<uint64_t>();
-        }
-
-        // Запись в файл с автоматическим созданием пути
-        static std::string currentFile = GetFilePath();
-        std::ofstream file(currentFile, std::ios::app);
-        if (file.is_open()) {
-            file << fullLog.dump() << std::endl;
-        }
-        numbers_of_logs++;
-        //if (numbers_of_logs % 10 == 0) { 
-        std::cout << "[Event] PID: " << pid
-            << " | Name: " << procName
-            << " | Start: " << startTime
-            << " | EventID: " << eventId
-            << " | Total: " << numbers_of_logs
+    //    // Обогащаем
+    //    json fullLog = LogEnricher::Enrich(xml, pid, last_cpu);
+    //    uint64_t startTime = 0;
+    //    std::string procName = "";
 
 
-            << std::endl;
-        //}
-    }
+    //    // 1. Проверяем, существует ли вообще ключ process_info
+    //    if (fullLog.contains("process_info") && fullLog["process_info"].is_object()) {
+
+    //        // 2. Получаем данные безопасно
+    //        auto& info = fullLog["process_info"];
+
+    //        // Используем тот ключ, который вы реально записали в Enrich (стандартно у нас start_time)
+    //        startTime = info.value("start_time", 0ULL);
+    //        procName = info.value("name", "Unknown");
+
+    //    }
+    //    else {
+    //        // Если ключа нет, выводим ошибку в консоль, чтобы понять, что не так
+    //        std::cerr << "[!] Debug: process_info key missing in log: " << fullLog.dump() << std::endl;
+    //    }
+    //    // вот если я убираю эти строчки, то перестает падать, дел в них
+    //    // Обновляем кэш, если данные получены успешно
+    //    if (fullLog.contains("metrics") && fullLog["metrics"].contains("_raw_cpu")) {
+    //        std::lock_guard<std::mutex> lock(g_CacheMutex);
+    //        g_ProcessCache[pid].last_cpu_time = fullLog["metrics"]["_raw_cpu"].get<uint64_t>();
+    //    }
+
+    //    // Запись в файл с автоматическим созданием пути
+    //    static std::string currentFile = GetFilePath();
+    //    std::ofstream file(currentFile, std::ios::app);
+    //    if (file.is_open()) {
+    //        file << fullLog.dump() << std::endl;
+    //    }
+    //    numbers_of_logs++;
+    //    //if (numbers_of_logs % 10 == 0) { 
+    //    std::cout << "[Event] PID: " << pid
+    //        << " | Name: " << procName
+    //        << " | Start: " << startTime
+    //        << " | EventID: " << eventId
+    //        << " | Total: " << numbers_of_logs
+
+
+    //        << std::endl;
+    //    //}
+    //}
     return ERROR_SUCCESS;
 }
 

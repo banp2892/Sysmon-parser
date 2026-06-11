@@ -9,6 +9,38 @@
 
 #pragma comment(lib, "wevtapi.lib")
 
+
+/**
+    * @struct StaticSysmonData
+    * @brief Структура для хранения разобранных данных события Sysmon.
+    */
+struct StaticSysmonData {
+    ///< Можно собрать из почти каждого ивента
+
+    int EventId; ///< Номер приходящего ивента
+    std::string UtcTime; ///< Время формирования ивента
+
+    std::string Image; ///< Полный путь к исполняемогу файл, можно взять от сюда имя процесса (есть во многих ивентах)
+    DWORD ProcessId; ///< PID процесса (есть во многих ивентах)
+    std::string ProcessGuid; ///< Уникальный GUID процесса в рамках Sysmon
+
+
+    ///< Собирается отдельной функцией
+    FILETIME createTime; ///< Время создания процесса
+
+
+    ///< Если есть EventId1
+    std::wstring commandLine;        ///< Строка аргументов командной строки
+    std::wstring companyName;        ///< Имя компании, чья подпись стоит на процессе
+    DWORD integrityLevel;            ///< Уровень целостности (1:Low, 2:Medium, 3:High, 4:System)
+    std::wstring ParentProcessGuid;  ///< [ParentProcessGuid] GUID родительского процесса
+    DWORD ParentProcessId;           ///< [ParentProcessId] PID родительского процесса
+    std::wstring ParentImage;        ///< [ParentImage] Путь к исполняемому файлу родителя
+    std::wstring ParentCommandLine;  ///< [ParentCommandLine] Командная строка родителя
+    std::wstring ParentUser;         ///< [ParentUser] Имя пользователя родительского процесса
+};
+
+
 /**
  * @namespace SysmonCollector
  * @brief Модуль для сбора и первичной обработки событий Sysmon.
@@ -118,7 +150,7 @@ namespace SysmonCollector {
     struct ProcessMetadata_2{
         DWORD pid = 0;
         FILETIME createTime = { 0, 0 };
-        ProcessStatus status = STATUS_NEW;
+        //ProcessStatus status = STATUS_NEW;
         ULONGLONG lastSeen = 0;
     };
 
@@ -138,15 +170,20 @@ namespace SysmonCollector {
         /**
         * @brief Добавляет или обновляет данные по ключу
         */
-        void UpdateData(const std::string& guid, DWORD pid, FILETIME createTime, ProcessStatus status) {
+        void UpdateData(const std::string& guid, DWORD pid, FILETIME createTime) {
             std::lock_guard<std::mutex> lock(mtx); ///< анлочить не надо, поскольку после завершения выполнения функции, деструктор мьютекса анлокнет его сам)
             auto& entry = guidMap[guid];
             entry.pid = pid;
             entry.createTime = createTime;
-            entry.status = status;
             entry.lastSeen = GetTickCount64();
         }
 
+        /**
+        * @brief Возвращает размер Map
+        */
+        uint64_t size() {
+            return guidMap.size();
+        }
 
         /**
          * @brief Быстрая проверка на существование (без копирования данных)
@@ -198,6 +235,11 @@ namespace SysmonCollector {
     } MY_PROCESS_BASIC_INFORMATION;
 
 
+
+    /**
+    * @brief Открывает Handle, чтобы дополнить процесс, сразу после создания функции
+    * @todo дописать функции, чтобы парсить данные о родителе (мб они и не нужны будут)
+    */
     void EnrichProcessData(DWORD pid, StaticSysmonData& data) {
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
         if (!hProcess) return;
@@ -244,35 +286,7 @@ namespace SysmonCollector {
     }
 
 
-    /**
-    * @struct StaticSysmonData
-    * @brief Структура для хранения разобранных данных события Sysmon.
-    */
-    struct StaticSysmonData {
-        ///< Можно собрать из почти каждого ивента
-
-        int EventId; ///< Номер приходящего ивента
-        //uint64_t UtcTime; ///< Время формирования ивента
-        
-        std::string Image; ///< Полный путь к исполняемогу файл, можно взять от сюда имя процесса (есть во многих ивентах)
-        DWORD ProcessId; ///< PID процесса (есть во многих ивентах)
-        std::string ProcessGuid; ///< Уникальный GUID процесса в рамках Sysmon
-
-
-        ///< Собирается отдельной функцией
-        FILETIME createTime; ///< Время создания процесса
-
-
-        ///< Если есть EventId1
-        std::wstring commandLine;        ///< Строка аргументов командной строки
-        std::wstring companyName;        ///< Имя компании, чья подпись стоит на процессе
-        DWORD integrityLevel;            ///< Уровень целостности (1:Low, 2:Medium, 3:High, 4:System)
-        std::wstring ParentProcessGuid;  ///< [ParentProcessGuid] GUID родительского процесса
-        DWORD ParentProcessId;           ///< [ParentProcessId] PID родительского процесса
-        std::wstring ParentImage;        ///< [ParentImage] Путь к исполняемому файлу родителя
-        std::wstring ParentCommandLine;  ///< [ParentCommandLine] Командная строка родителя
-        std::wstring ParentUser;         ///< [ParentUser] Имя пользователя родительского процесса
-    };
+    
 
 
     /**
@@ -283,55 +297,83 @@ namespace SysmonCollector {
     StaticSysmonData ParseSysmonEvent(const std::string& xml) {
         StaticSysmonData data = {};
 
+        
+
+
         /**
-         * @brief Внутренняя лямбда-функция для поиска значений тегов.
-         * @param fieldName Имя тега или имя параметра Data Name.
-         * @param isSystemTag Флаг: true, если ищем обычный XML тег, false - если ищем атрибут Data Name.
+         * @brief Внутренняя лямбда для поиска значений.
+         * Обрабатывает как обычные XML теги, так и атрибуты Data Name.
          */
         auto GetValue = [&](const std::string& fieldName, bool isSystemTag) -> std::string {
-            std::string pattern = isSystemTag ? ("<" + fieldName + ">") : ("Name=\"" + fieldName + "\"");
-            size_t start = xml.find(pattern);
-            if (start == std::string::npos) return "";
+            if (isSystemTag) {
 
-            if (!isSystemTag) {
-                start = xml.find(">", start);
+                
+
+                // Поиск системных тегов типа <EventID>
+                std::string openTag = "<" + fieldName + ">";
+                std::string closeTag = "</" + fieldName + ">";
+                size_t start = xml.find(openTag);
                 if (start == std::string::npos) return "";
-                start += 1;
+
+                start += openTag.length();
+                size_t end = xml.find(closeTag, start);
+                return (end != std::string::npos) ? xml.substr(start, end - start) : "";
             }
             else {
-                start += pattern.length();
-            }
+                // Поиск в <Data Name="...">
+                // Проверяем оба типа кавычек, так как XML Sysmon может их варьировать
+                std::string keyDouble = "Name=\"" + fieldName + "\">";
+                std::string keySingle = "Name='" + fieldName + "'>";
 
-            size_t end = xml.find(isSystemTag ? ("</" + fieldName + ">") : "</Data>", start);
-            return (end != std::string::npos) ? xml.substr(start, end - start) : "";
+                size_t pos = xml.find(keyDouble);
+                size_t keyLen = keyDouble.length();
+
+                if (pos == std::string::npos) {
+                    pos = xml.find(keySingle);
+                    keyLen = keySingle.length();
+                }
+
+                if (pos == std::string::npos) return "";
+
+                size_t start = pos + keyLen;
+                size_t end = xml.find("</Data>", start);
+                return (end != std::string::npos) ? xml.substr(start, end - start) : "";
+            }
             };
 
 
-        ///< Копируем GUID процесса:
-        std::string procGuid = GetValue("ProcessGuid", false);
-        if (!procGuid.empty()) {
-            data.ProcessGuid = procGuid;
+        data.UtcTime = GetValue("UtcTime", false);
+
+        // 1. Парсинг EventID
+        std::string eid = GetValue("EventID", true);
+        if (!eid.empty()) {
+            try { data.EventId = std::stoi(eid); }
+            catch (...) { data.EventId = 0; }
         }
 
-        // Парсинг ID события
-        std::string eid = GetValue("EventID", true);
-        if (!eid.empty()) data.EventId = std::stoi(eid);
-
-        // Основные данные процесса
+        // 2. Базовые поля процесса (есть во многих ивентах)
+        data.ProcessGuid = GetValue("ProcessGuid", false);
         data.Image = GetValue("Image", false);
 
         std::string pidStr = GetValue("ProcessId", false);
-        if (!pidStr.empty()) data.ProcessId = std::stoul(pidStr);
+        if (!pidStr.empty()) {
+            try { data.ProcessId = std::stoul(pidStr); }
+            catch (...) { data.ProcessId = 0; }
+        }
 
-        // Обработка командной строки (удаление префикса NT и замена переносов)
-        if (stoi(eid) == 1) {
+        // 3. Специфичные данные для EventID 1 (Process Create)
+        if (data.EventId == 1) {
+            // Командная строка
             std::string cmd = GetValue("CommandLine", false);
-            if (cmd.find("\\??\\") == 0) cmd = cmd.substr(4);
-            std::replace(cmd.begin(), cmd.end(), '\n', ' ');
-            data.commandLine = std::wstring(cmd.begin(), cmd.end());
+            if (!cmd.empty()) {
+                if (cmd.find("\\??\\") == 0) cmd = cmd.substr(4);
+                std::replace(cmd.begin(), cmd.end(), '\n', ' ');
+                data.commandLine = std::wstring(cmd.begin(), cmd.end());
+            }
 
-            // Имя компании
-            data.companyName = std::wstring(GetValue("Company", false).begin(), GetValue("Company", false).end());
+            // Компания
+            std::string comp = GetValue("Company", false);
+            data.companyName = std::wstring(comp.begin(), comp.end());
 
             // Уровень целостности
             std::string integ = GetValue("IntegrityLevel", false);
@@ -340,14 +382,23 @@ namespace SysmonCollector {
             else if (integ == "Medium") data.integrityLevel = 2;
             else data.integrityLevel = 1;
 
-            // Данные родительского процесса
-            std::string pPidStr = GetValue("ParentProcessId", false);
-            if (!pPidStr.empty()) data.ParentProcessId = std::stoul(pPidStr);
+            // Данные родителя
+            std::string pPid = GetValue("ParentProcessId", false);
+            if (!pPid.empty()) {
+                try { data.ParentProcessId = std::stoul(pPid); }
+                catch (...) { data.ParentProcessId = 0; }
+            }
 
-            data.ParentImage = std::wstring(GetValue("ParentImage", false).begin(), GetValue("ParentImage", false).end());
-            data.ParentCommandLine = std::wstring(GetValue("ParentCommandLine", false).begin(), GetValue("ParentCommandLine", false).end());
-            data.ParentUser = std::wstring(GetValue("ParentUser", false).begin(), GetValue("ParentUser", false).end());
+            std::string pImg = GetValue("ParentImage", false);
+            data.ParentImage = std::wstring(pImg.begin(), pImg.end());
+
+            std::string pCmd = GetValue("ParentCommandLine", false);
+            data.ParentCommandLine = std::wstring(pCmd.begin(), pCmd.end());
+
+            std::string pUser = GetValue("ParentUser", false);
+            data.ParentUser = std::wstring(pUser.begin(), pUser.end());
         }
+
         return data;
     }
 
