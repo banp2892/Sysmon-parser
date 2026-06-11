@@ -41,6 +41,7 @@ std::string GetFilePath() {
 * @brief Функция, принимающая лог Sysmon и обрабатывающая его обогащение и сохранение
 */
 DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pContext, EVT_HANDLE hEvent) {
+    auto* mapPtr = static_cast<SysmonCollector::SysmonProcessesMap*>(pContext);
     if (action != EvtSubscribeActionDeliver) return ERROR_SUCCESS;
 
     std::string xml = SysmonCollector::GetXmlFromEvent(hEvent);
@@ -51,8 +52,24 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
     SysmonCollector::StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
 
+
     DWORD pid = StaticSysmon.ProcessId;
     int eventId = StaticSysmon.EventId;
+    std::string Guid = StaticSysmon.ProcessGuid;
+
+
+    if (!mapPtr->Exists(Guid)) { ///< Если записи не существует
+
+
+        SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
+       
+
+
+        //mapPtr->UpdateData(Guid, pid, )
+    }
+    
+    SysmonCollector::ProcessMetadata_2 ThisData;
+    mapPtr->TryGet(Guid, ThisData);
 
 
     if (eventId == 5) {
@@ -144,13 +161,17 @@ int main() {
         std::cerr << "[-] Run as Administarator to get access for all process." << std::endl;
     }
 
-    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational", ///< Подписываемся на логи от Sysmon, если они приходят, то мы вызываем функцию SubscriptionCallback()
-        L"*", NULL, NULL, SubscriptionCallback, EvtSubscribeToFutureEvents);
+    SysmonCollector::SysmonProcessesMap SysmonMap; ///< Создаем карту процессов, чтобы 
+
+    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational", ///< Подписываемся на логи от Sysmon, если они приходят, то мы вызываем функцию SubscriptionCallback(), и передаем ей Map для дальнешего использования
+        L"*", NULL, &SysmonMap, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
         std::cerr << "[-] FAILED: Failed subscribe to Sysmon." << std::endl;
         return 1;
     }
+
+   
 
     std::cout << "[+] Monitoring has been started. The data will be saved in /data" << std::endl;
     Sleep(INFINITE);

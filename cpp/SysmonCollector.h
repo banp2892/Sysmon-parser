@@ -4,6 +4,8 @@
 #include <vector>
 #include <string>
 #include "json.hpp"
+#include <winternl.h>
+
 
 #pragma comment(lib, "wevtapi.lib")
 
@@ -113,19 +115,133 @@ namespace SysmonCollector {
         STATUS_DEAD = 3
     };
 
-    struct ProcessMetadata {
+    struct ProcessMetadata_2{
         DWORD pid = 0;
         FILETIME createTime = { 0, 0 };
         ProcessStatus status = STATUS_NEW;
         ULONGLONG lastSeen = 0;
     };
 
-    class SysmonProcesses {
-    private:
-        std::unordered_map <std::string, ProcessMetadata> guidMap; ///< Для склеивания с метриками
 
+    /*
+    * @brief Для склеивания с метриками и хранения данных о процессах, разделяемых GUID`ом
+    */
+    class SysmonProcessesMap {
+    private:
+        std::unordered_map<std::string, ProcessMetadata_2> guidMap; ///< Для склеивания с метриками
+        std::mutex mtx; ///< для защиты карты процессов
+
+    public:
+
+
+
+        /**
+        * @brief Добавляет или обновляет данные по ключу
+        */
+        void UpdateData(const std::string& guid, DWORD pid, FILETIME createTime, ProcessStatus status) {
+            std::lock_guard<std::mutex> lock(mtx); ///< анлочить не надо, поскольку после завершения выполнения функции, деструктор мьютекса анлокнет его сам)
+            auto& entry = guidMap[guid];
+            entry.pid = pid;
+            entry.createTime = createTime;
+            entry.status = status;
+            entry.lastSeen = GetTickCount64();
+        }
+
+
+        /**
+         * @brief Быстрая проверка на существование (без копирования данных)
+         */
+        bool Exists(const std::string& guid) {
+            std::lock_guard<std::mutex> lock(mtx);
+            return guidMap.find(guid) != guidMap.end();
+        }
+
+
+        /**
+         * @brief Пытается найти процесс по GUID
+         * @return true, если процесс найден, и записывает данные в outMetadata
+         */
+        bool TryGet(const std::string& guid, ProcessMetadata_2& outMetadata) {
+            std::lock_guard<std::mutex> lock(mtx); // Блокируем для безопасного чтения
+
+            auto it = guidMap.find(guid); // Ищем элемент
+            if (it != guidMap.end()) {
+                outMetadata = it->second; // Копируем данные
+                return true;
+            }
+            return false; // Элемента нет
+        }
     };
 
+    typedef enum _PROCESSINFOCLASS_CUSTOM {
+        ProcessBasicInformation = 0,
+        ProcessTimes = 4,
+    } PROCESSINFOCLASS_CUSTOM;
+
+    // 2. Структура KERNEL_USER_TIMES
+    typedef struct _KERNEL_USER_TIMES {
+        LARGE_INTEGER CreateTime;
+        LARGE_INTEGER ExitTime;
+        LARGE_INTEGER KernelTime;
+        LARGE_INTEGER UserTime;
+    } KERNEL_USER_TIMES, * PKERNEL_USER_TIMES;
+
+    // 3. Исправленная структура PROCESS_BASIC_INFORMATION
+    // В winternl.h она часто неполная. Используем эту версию:
+    typedef struct _MY_PROCESS_BASIC_INFORMATION {
+        NTSTATUS ExitStatus;
+        PVOID PebBaseAddress;
+        ULONG_PTR AffinityMask;
+        KPRIORITY BasePriority;
+        ULONG_PTR UniqueProcessId;
+        ULONG_PTR InheritedFromUniqueProcessId; // Тот самый член, на который ругается компилятор
+    } MY_PROCESS_BASIC_INFORMATION;
+
+
+    void EnrichProcessData(DWORD pid, StaticSysmonData& data) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProcess) return;
+
+        auto NtQueryInfo = (NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG))
+            GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+
+        if (!NtQueryInfo) {
+            CloseHandle(hProcess);
+            return;
+        }
+
+        // --- ЗАПОЛНЯЕМ Image ---
+        if (data.Image.empty()) {
+            WCHAR pathBuffer[MAX_PATH];
+            DWORD size = MAX_PATH;
+            if (QueryFullProcessImageNameW(hProcess, 0, pathBuffer, &size)) {
+                data.Image = WStringToString(pathBuffer);
+            }
+        }
+
+        // --- ЗАПОЛНЯЕМ CreateTime ---
+        if (data.createTime.dwLowDateTime == 0 && data.createTime.dwHighDateTime == 0) {
+            KERNEL_USER_TIMES times = { 0 };
+            // Приводим enum к (PROCESSINFOCLASS)
+            if (NtQueryInfo(hProcess, (PROCESSINFOCLASS)ProcessTimes, &times, sizeof(times), NULL) == 0) {
+                // КОПИРУЕМ ЧЕРЕЗ LOW/HIGH PART
+                data.createTime.dwLowDateTime = times.CreateTime.LowPart;
+                data.createTime.dwHighDateTime = times.CreateTime.HighPart;
+            }
+        }
+
+        // --- ЗАПОЛНЯЕМ ParentProcessId ---
+        if (data.ParentProcessId == 0) {
+            // Используем твою кастомную структуру как буфер
+            MY_PROCESS_BASIC_INFORMATION pbi = { 0 };
+            // Приводим enum к (PROCESSINFOCLASS)
+            if (NtQueryInfo(hProcess, (PROCESSINFOCLASS)ProcessBasicInformation, &pbi, sizeof(pbi), NULL) == 0) {
+                data.ParentProcessId = (DWORD)pbi.InheritedFromUniqueProcessId;
+            }
+        }
+
+        CloseHandle(hProcess);
+    }
 
 
     /**
@@ -136,9 +252,16 @@ namespace SysmonCollector {
         ///< Можно собрать из почти каждого ивента
 
         int EventId; ///< Номер приходящего ивента
-        uint64_t UtcTime; ///< Время формирования ивента
+        //uint64_t UtcTime; ///< Время формирования ивента
+        
         std::string Image; ///< Полный путь к исполняемогу файл, можно взять от сюда имя процесса (есть во многих ивентах)
         DWORD ProcessId; ///< PID процесса (есть во многих ивентах)
+        std::string ProcessGuid; ///< Уникальный GUID процесса в рамках Sysmon
+
+
+        ///< Собирается отдельной функцией
+        FILETIME createTime; ///< Время создания процесса
+
 
         ///< Если есть EventId1
         std::wstring commandLine;        ///< Строка аргументов командной строки
@@ -182,6 +305,13 @@ namespace SysmonCollector {
             size_t end = xml.find(isSystemTag ? ("</" + fieldName + ">") : "</Data>", start);
             return (end != std::string::npos) ? xml.substr(start, end - start) : "";
             };
+
+
+        ///< Копируем GUID процесса:
+        std::string procGuid = GetValue("ProcessGuid", false);
+        if (!procGuid.empty()) {
+            data.ProcessGuid = procGuid;
+        }
 
         // Парсинг ID события
         std::string eid = GetValue("EventID", true);
