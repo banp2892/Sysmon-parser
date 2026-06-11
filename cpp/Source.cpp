@@ -98,9 +98,14 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
                 << " | Image: " << StaticSysmon.Image
                 << std::endl;
         }
-    }
-    
 
+
+
+    }
+    ///< @todo написать логику, если данные уже есть, возможно надо вызвать еще раз EnrichProcessData, и так же вызвать обогощение метриками
+
+
+    ///< @todo написать вызов функции, которая находит в базе метрик, наш процесс, чтобы скопировать оттуда данные
 
 
     //if (eventId == 5) {
