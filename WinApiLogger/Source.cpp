@@ -124,6 +124,7 @@ public:
     }
 
     void ExecuteQueryAndProcess() {
+
         if (!m_pfnNtQuerySystemInformation) return;
 
         ULONG requiredSize = 0;
@@ -131,6 +132,7 @@ public:
 
         // »теративный запуск опроса системных структур с защитой от нулевого размера в WoW64
         while (true) {
+            system("cls");
             status = m_pfnNtQuerySystemInformation(
                 SystemProcessInformation,
                 m_telemetryBuffer.data(),
@@ -215,6 +217,7 @@ public:
 
             // ƒемонстрационный вывод процессов, про€вл€ющих активность
             if (cpuPercentage > 1.0 || readSpeed > 500 * 1024 || writeSpeed > 500 * 1024) {
+                
                 std::wcout << std::left << std::setw(22) << processName
                     << L" PID: " << std::setw(6) << pid
                     << L" CPU: " << std::fixed << std::setprecision(1) << std::setw(5) << cpuPercentage << L"%"
@@ -226,14 +229,13 @@ public:
                     << std::fixed << std::setprecision(1) << (readSpeed / 1024.0 / 1024.0) << L" / "
                     << (writeSpeed / 1024.0 / 1024.0) << L" / "
                     << (otherSpeed / 1024.0 / 1024.0) << L" MB/s"
-                    << std::endl
-                    << "-------------------------------"
                     << std::endl;
             }
 
             if (pProcessData->NextEntryOffset == 0) break;
             pCurrentPosition += pProcessData->NextEntryOffset;
         }
+        
     }
 };
 
@@ -244,7 +246,7 @@ int main() {
     while (true) {
         monitor.ExecuteQueryAndProcess();
         // ѕауза 20 миллисекунд соответствует частоте опроса 50 √ц
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return 0;
 }
