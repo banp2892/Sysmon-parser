@@ -49,14 +49,11 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
         return ERROR_SUCCESS;
     }
 
-    StaticSysmonData StaticSysmon = ParseSysmonEvent(xml);
+    SysmonCollector::StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
 
     DWORD pid = StaticSysmon.ProcessId;
     int eventId = StaticSysmon.EventId;
 
-
-    DWORD pid = SysmonCollector::GetPidFromXml(xml);
-    int eventId = SysmonCollector::GetEventIdFromXml(xml);
 
     if (eventId == 5) {
         std::lock_guard<std::mutex> lock(g_CacheMutex);
