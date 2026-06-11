@@ -36,11 +36,24 @@ std::string GetFilePath() {
     return oss.str();
 }
 
+
+/**
+* @brief Функция, принимающая лог Sysmon и обрабатывающая его обогащение и сохранение
+*/
 DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pContext, EVT_HANDLE hEvent) {
     if (action != EvtSubscribeActionDeliver) return ERROR_SUCCESS;
 
     std::string xml = SysmonCollector::GetXmlFromEvent(hEvent);
-    if (xml.empty()) return ERROR_SUCCESS;
+    if (xml.empty()) {
+        std::cout << "Failed to get XML" << std::endl;
+        return ERROR_SUCCESS;
+    }
+
+    StaticSysmonData StaticSysmon = ParseSysmonEvent(xml);
+
+    DWORD pid = StaticSysmon.ProcessId;
+    int eventId = StaticSysmon.EventId;
+
 
     DWORD pid = SysmonCollector::GetPidFromXml(xml);
     int eventId = SysmonCollector::GetEventIdFromXml(xml);
@@ -58,7 +71,26 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
         // Обогащаем
         json fullLog = LogEnricher::Enrich(xml, pid, last_cpu);
+        uint64_t startTime = 0;
+        std::string procName = "";
 
+
+        // 1. Проверяем, существует ли вообще ключ process_info
+        if (fullLog.contains("process_info") && fullLog["process_info"].is_object()) {
+
+            // 2. Получаем данные безопасно
+            auto& info = fullLog["process_info"];
+
+            // Используем тот ключ, который вы реально записали в Enrich (стандартно у нас start_time)
+            startTime = info.value("start_time", 0ULL);
+            procName = info.value("name", "Unknown");
+
+        }
+        else {
+            // Если ключа нет, выводим ошибку в консоль, чтобы понять, что не так
+            std::cerr << "[!] Debug: process_info key missing in log: " << fullLog.dump() << std::endl;
+        }
+        // вот если я убираю эти строчки, то перестает падать, дел в них
         // Обновляем кэш, если данные получены успешно
         if (fullLog.contains("metrics") && fullLog["metrics"].contains("_raw_cpu")) {
             std::lock_guard<std::mutex> lock(g_CacheMutex);
@@ -72,9 +104,16 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
             file << fullLog.dump() << std::endl;
         }
         numbers_of_logs++;
-        if (numbers_of_logs % 10 == 0) { 
-            std::cout << "[Event Captured] PID: " << pid << " | EventID: " << eventId << " Numbers: " << numbers_of_logs << std::endl;
-        }
+        //if (numbers_of_logs % 10 == 0) { 
+        std::cout << "[Event] PID: " << pid
+            << " | Name: " << procName
+            << " | Start: " << startTime
+            << " | EventID: " << eventId
+            << " | Total: " << numbers_of_logs
+
+
+            << std::endl;
+        //}
     }
     return ERROR_SUCCESS;
 }
@@ -108,7 +147,7 @@ int main() {
         std::cerr << "[-] Run as Administarator to get access for all process." << std::endl;
     }
 
-    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational",
+    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational", ///< Подписываемся на логи от Sysmon, если они приходят, то мы вызываем функцию SubscriptionCallback()
         L"*", NULL, NULL, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {

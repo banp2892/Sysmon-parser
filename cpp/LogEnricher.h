@@ -17,6 +17,17 @@
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "wintrust.lib")
 
+
+
+
+
+
+
+
+
+
+
+
 /**
  * @struct ProcessMetadata
  * @brief Хранит детальную информацию о процессе для анализа. 
@@ -25,6 +36,7 @@ struct ProcessMetadata {
     std::wstring name;               ///< Имя процесса
     std::wstring commandLine;        ///< Строка аргументов командной строки
     std::wstring companyName;        ///< Имя компании, чья подпись стоит на процессе
+    uint64_t startTime;              ///< Время старта процесса
     bool isSigned;                   ///< Флаг, подтверждающий наличие валидной цифровой подписи
 };
 
@@ -54,11 +66,117 @@ struct ParentProcessInfo {
     }
 };
 
+
+/**
+ * @struct StaticSysmonData
+ * @brief Структура для хранения разобранных данных события Sysmon.
+ */
+struct StaticSysmonData {
+    ///< Можно собрать из почти каждого ивента
+    int EventId; ///< Номер приходящего ивента
+    uint64_t UtcTime; ///< Время формирования ивента
+    std::string Image; ///< Полный путь к исполняемогу файл, можно взять от сюда имя процесса (есть во многих ивентах)
+    DWORD ProcessId; ///< PID процесса (есть во многих ивентах)
+
+    ///< Если есть EventId1
+    std::wstring commandLine;        ///< Строка аргументов командной строки
+    std::wstring companyName;        ///< Имя компании, чья подпись стоит на процессе
+    DWORD integrityLevel;            ///< Уровень целостности (1:Low, 2:Medium, 3:High, 4:System)
+    std::wstring ParentProcessGuid;  ///< [ParentProcessGuid] GUID родительского процесса
+    DWORD ParentProcessId;           ///< [ParentProcessId] PID родительского процесса
+    std::wstring ParentImage;        ///< [ParentImage] Путь к исполняемому файлу родителя
+    std::wstring ParentCommandLine;  ///< [ParentCommandLine] Командная строка родителя
+    std::wstring ParentUser;         ///< [ParentUser] Имя пользователя родительского процесса
+};
+
+
+/**
+ * @brief Парсит XML-строку события Sysmon и заполняет структуру StaticSysmonData.
+ * * @param xml Строка, содержащая XML-разметку события Sysmon.
+ * @return Заполненная структура StaticSysmonData с данными события.
+ */
+StaticSysmonData ParseSysmonEvent(const std::string& xml) {
+    StaticSysmonData data = {};
+
+    /**
+     * @brief Внутренняя лямбда-функция для поиска значений тегов.
+     * @param fieldName Имя тега или имя параметра Data Name.
+     * @param isSystemTag Флаг: true, если ищем обычный XML тег, false - если ищем атрибут Data Name.
+     */
+    auto GetValue = [&](const std::string& fieldName, bool isSystemTag) -> std::string {
+        std::string pattern = isSystemTag ? ("<" + fieldName + ">") : ("Name=\"" + fieldName + "\"");
+        size_t start = xml.find(pattern);
+        if (start == std::string::npos) return "";
+
+        if (!isSystemTag) {
+            start = xml.find(">", start);
+            if (start == std::string::npos) return "";
+            start += 1;
+        }
+        else {
+            start += pattern.length();
+        }
+
+        size_t end = xml.find(isSystemTag ? ("</" + fieldName + ">") : "</Data>", start);
+        return (end != std::string::npos) ? xml.substr(start, end - start) : "";
+        };
+
+    // Парсинг ID события
+    std::string eid = GetValue("EventID", true);
+    if (!eid.empty()) data.EventId = std::stoi(eid);
+
+    // Основные данные процесса
+    data.Image = GetValue("Image", false);
+
+    std::string pidStr = GetValue("ProcessId", false);
+    if (!pidStr.empty()) data.ProcessId = std::stoul(pidStr);
+
+    // Обработка командной строки (удаление префикса NT и замена переносов)
+    std::string cmd = GetValue("CommandLine", false);
+    if (cmd.find("\\??\\") == 0) cmd = cmd.substr(4);
+    std::replace(cmd.begin(), cmd.end(), '\n', ' ');
+    data.commandLine = std::wstring(cmd.begin(), cmd.end());
+
+    // Имя компании
+    data.companyName = std::wstring(GetValue("Company", false).begin(), GetValue("Company", false).end());
+
+    // Уровень целостности
+    std::string integ = GetValue("IntegrityLevel", false);
+    if (integ == "System") data.integrityLevel = 4;
+    else if (integ == "High") data.integrityLevel = 3;
+    else if (integ == "Medium") data.integrityLevel = 2;
+    else data.integrityLevel = 1;
+
+    // Данные родительского процесса
+    std::string pPidStr = GetValue("ParentProcessId", false);
+    if (!pPidStr.empty()) data.ParentProcessId = std::stoul(pPidStr);
+
+    data.ParentImage = std::wstring(GetValue("ParentImage", false).begin(), GetValue("ParentImage", false).end());
+    data.ParentCommandLine = std::wstring(GetValue("ParentCommandLine", false).begin(), GetValue("ParentCommandLine", false).end());
+    data.ParentUser = std::wstring(GetValue("ParentUser", false).begin(), GetValue("ParentUser", false).end());
+
+    return data;
+}
+
+
+
+
+
 /**
  * @namespace ProcessMetrics
  * @brief Вспомогательные функции для сбора метрик процесса.
  */
 namespace ProcessMetrics {
+
+
+
+
+
+
+
+
+
+
 
     /**
      * @brief Получает объем частной памяти процесса (Private Bytes).
@@ -354,9 +472,17 @@ namespace ProcessMetrics {
             meta.isSigned = ProcessMetrics::IsFileSigned(path);
         }
 
+        // Время старта процесса
+        FILETIME creation, exit, kernel, user;
+        if (GetProcessTimes(hProcess, &creation, &exit, &kernel, &user)) {
+            uint64_t intervals = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+            // Конвертация в Unix Timestamp (секунды с 1970)
+            meta.startTime = (intervals / 10000000ULL) - 11644473600ULL;
+        }
+
         CloseHandle(hProcess);
         return meta;
-        }
+    }
 
     
 
@@ -392,10 +518,7 @@ namespace LogEnricher {
 
         if (hProcess) {
             uint64_t current_cpu = ProcessMetrics::GetTotalCPUTime(hProcess);
-            /*if (last_cpu_time > 0) {
-                printf("[DEBUG] PID: %lu, Current: %llu, Last: %llu, Diff: %lld\n",
-                    pid, current_cpu, last_cpu_time, (long long)(current_cpu - last_cpu_time));
-            }*/
+
 
             j["metrics"]["private_bytes"] = ProcessMetrics::GetPrivateBytes(hProcess); ///< Количество частной памяти процесса?
             j["metrics"]["io"] = ProcessMetrics::GetIOCounters(hProcess); ///< Количество ввода и вывода процесса в байтах?
@@ -408,6 +531,7 @@ namespace LogEnricher {
             j["process_info"]["company"] = std::string(meta.companyName.begin(), meta.companyName.end());
             j["process_info"]["command_line"] = std::string(meta.commandLine.begin(), meta.commandLine.end());
             j["process_info"] ["is_signed"] = meta.isSigned;
+            j["process_info"]["startTime"] = meta.startTime;
 
             DWORD pPid = ProcessMetrics::GetParentProcessId(pid);
             ParentProcessInfo pInfo = ProcessMetrics::GetParentDetails(pPid);
