@@ -13,6 +13,10 @@
 #include <shlobj.h> ///< Для проверки запуска программы от имени администратора
 #include "Metrics.h"
 
+#include <atomic>
+#include <thread>
+#include <chrono>
+
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -77,22 +81,16 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
     StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
 
-    ProcessRecord* pRecord = nullptr;
-    bool hasValidTime = (StaticSysmon.createTime.dwLowDateTime != 0 ||
-        StaticSysmon.createTime.dwHighDateTime != 0);
 
-    
-
-    if (hasValidTime) {///< @todo, тут проверить, почему не заходит внутрь, даже если у нас спарсилось время?? + почему то по pid не может найти
-        pRecord = pMonitor->GetRecord(StaticSysmon.ProcessId, StaticSysmon.createTime);
-    }
-    else {
-        pRecord = pMonitor->GetRecord(StaticSysmon.ProcessId);
-    }
+    LARGE_INTEGER liTime;
+    liTime.LowPart = StaticSysmon.createTime.dwLowDateTime;
+    liTime.HighPart = (LONG)StaticSysmon.createTime.dwHighDateTime;
 
     DWORD pid = StaticSysmon.ProcessId;
     int eventId = StaticSysmon.EventId;
     std::string Guid = StaticSysmon.ProcessGuid;
+
+    auto recordOpt = pMonitor->GetRecord(pid, liTime);
 
 
     if (!pMap->Exists(Guid)) { ///< Если записи не существует
@@ -202,7 +200,16 @@ bool EnableDebugPrivilege() {
 }
 
 
+void MetricsCollectionWorker(SystemPerformanceTelemetryMonitor& monitor, std::atomic<bool>& running) {
+    std::cout << "[MetricsWorker] Thread started." << std::endl;
 
+    while (running) {
+        monitor.ExecuteQueryAndProcess();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    std::cout << "[MetricsWorker] Thread stopped." << std::endl;
+}
 
 int main() {
     setlocale(LC_ALL, "Russian");
@@ -212,30 +219,49 @@ int main() {
         return 1;
     }
 
-    // Подготовка среды
     if (!fs::exists("data")) fs::create_directory("data");
 
     if (!EnableDebugPrivilege()) {
         std::cerr << "[-] Run as Administarator to get access for all process." << std::endl;
     }
 
-    SysmonCollector::SysmonProcessesMap SysmonMap; ///< Создаем карту процессов, чтобы 
+    SysmonCollector::SysmonProcessesMap SysmonMap;
     SystemPerformanceTelemetryMonitor monitor;
     static SubscriptionContext subCtx = { &SysmonMap, &monitor };
 
-    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational", ///< Подписываемся на логи от Sysmon, если они приходят, то мы вызываем функцию SubscriptionCallback(), и передаем ей Map для дальнешего использования
+    // --- 1. Флаг управления потоком ---
+    std::atomic<bool> isRunning(true);
+
+    // --- 2. Запуск потока метрик ---
+    // Передаем monitor и isRunning по ссылке
+    std::thread metricsThread(MetricsCollectionWorker, std::ref(monitor), std::ref(isRunning));
+
+    EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational",
         L"*", NULL, &subCtx, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
         std::cerr << "[-] FAILED: Failed subscribe to Sysmon." << std::endl;
+        // Если подписка не удалась, нужно корректно закрыть поток
+        isRunning = false;
+        if (metricsThread.joinable()) metricsThread.join();
         return 1;
     }
 
-   
+    std::cout << "[+] Monitoring has been started. Press ENTER to stop." << std::endl;
 
-    std::cout << "[+] Monitoring has been started. The data will be saved in /data" << std::endl;
-    Sleep(INFINITE);
+    // --- 3. Ожидание завершения вместо Sleep(INFINITE) ---
+    // Это позволит программе работать, пока вы не нажмете Enter
+    std::cin.get();
+
+    // --- 4. Корректное завершение ---
+    std::cout << "[!] Stopping... Please wait." << std::endl;
+
+    isRunning = false;           // Сигнал потоку остановиться
+    if (metricsThread.joinable()) {
+        metricsThread.join();    // Ждем, пока поток завершит итерацию
+    }
 
     EvtClose(hSub);
+    std::cout << "[+] Stopped." << std::endl;
     return 0;
 }

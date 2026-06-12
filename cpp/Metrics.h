@@ -14,8 +14,10 @@
 #include <algorithm> 
 
 
-#include <cstddef> // Для offsetof
 
+#include <cstddef> // Для offsetof
+#include <optional>
+#include <shared_mutex>
 
 #include <sstream>
 //#include <winternl.h>
@@ -147,7 +149,7 @@ struct ProcessRecord {
 
 class SystemPerformanceTelemetryMonitor {
 private:
-    mutable std::mutex m_mutex;
+    mutable std::shared_mutex m_mutex;
     pfnNtQuerySystemInformation m_pfnNtQuerySystemInformation = nullptr;
     std::vector<BYTE> m_telemetryBuffer;
     SYSTEM_INFO m_sysInfo;
@@ -176,11 +178,16 @@ public:
 
 
 
-    ProcessRecord* GetRecord(DWORD pid, FILETIME createTime) {
-        LARGE_INTEGER li;
-        li.LowPart = createTime.dwLowDateTime;
-        li.HighPart = (LONG)createTime.dwHighDateTime;
-        return GetRecord(pid, li);
+    std::optional<ProcessRecord> GetRecord(DWORD pid, LARGE_INTEGER createTime) const {
+        std::shared_lock<std::shared_mutex> lock(m_mutex); // Shared lock (чтение)
+
+        ProcessKey key{ pid, createTime };
+        auto it = m_processDatabase.find(key);
+
+        if (it != m_processDatabase.end()) {
+            return it->second; // Возвращаем копию
+        }
+        return std::nullopt;
     }
 
     void ExecuteQueryAndProcess() {
@@ -213,7 +220,7 @@ public:
     }
 
     ProcessRecord* GetRecord(DWORD pid, LARGE_INTEGER createTime) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
 
         ProcessKey key{ pid, createTime };
         auto it = m_processDatabase.find(key);
@@ -225,7 +232,7 @@ public:
     }
 
     ProcessRecord* GetRecord(DWORD pid) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
 
         // 1. Ищем актуальный CreateTime для этого PID
         auto activeIt = m_activePidMap.find(pid);
@@ -245,7 +252,7 @@ public:
 
 
     void ParseBuffer() {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto currentTimePoint = std::chrono::steady_clock::now();
         BYTE* pCurrentPosition = m_telemetryBuffer.data();
 
@@ -312,7 +319,7 @@ public:
 
     // Удаление "мертвых" процессов (которые не обновлялись 5 секунд)
     void PruneDatabase() {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
             if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
@@ -331,7 +338,7 @@ public:
 
     // Быстрый доступ к активному процессу по PID ($O(1)$)
     bool GetActiveRecordByPid(DWORD pid, ProcessRecord& outRecord) const {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto it = m_activePidMap.find(pid);
         if (it == m_activePidMap.end()) return false;
 
@@ -383,7 +390,7 @@ public:
 
 
     void DisplayTopProcesses(int topCount) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
 
         struct ProcessDisplay {
             DWORD pid;
