@@ -26,6 +26,7 @@
     <ClInclude Include="..\cpp\LogEnricher.h" />
     <ClInclude Include="..\cpp\Structures.h" />
     <ClInclude Include="..\cpp\SysmonCollector.h" />
+    <ClInclude Include="Metrics.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

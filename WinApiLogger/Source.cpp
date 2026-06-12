@@ -1,54 +1,48 @@
-/**
- * @file SystemPerformanceTelemetryMonitor.cpp
- * @brief Монитор телеметрии процессов с полным сохранением состояния в БД.
- * * Данная программа собирает данные через недокументированные API Windows (NtQuerySystemInformation),
- * формирует "снимки" (snapshots) состояния каждого процесса и сохраняет их в
- * структурированную базу данных (std::map), индексированную по уникальному ключу {PID + CreateTime}.
- */
-
+#define NOMINMAX
 #include <windows.h>
 #include <iostream>
 #include <vector>
-#include <map>
+#include <unordered_map>
 #include <string>
 #include <chrono>
 #include <thread>
 #include <iomanip>
+#include <mutex>
+#include <functional>
+#include <algorithm> 
+#include <iomanip>   
+#include <vector>
 
+// --- Native API Definitions ---
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
 
- /**
-  * @enum _SYSTEM_INFORMATION_CLASS
-  * @brief Классы системной информации. 5 соответствует SystemProcessInformation.
-  */
+
+void EnableAnsiSupport() {
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut == INVALID_HANDLE_VALUE) return;
+    DWORD dwMode = 0;
+    GetConsoleMode(hOut, &dwMode);
+    dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(hOut, dwMode);
+}
+
+
 typedef enum _SYSTEM_INFORMATION_CLASS {
     SystemProcessInformation = 5
 } SYSTEM_INFORMATION_CLASS;
 
-/**
- * @struct _UNICODE_STRING
- * @brief Структура для представления Unicode-строк в Native API.
- */
 typedef struct _UNICODE_STRING {
     USHORT Length;
     USHORT MaximumLength;
     PWSTR Buffer;
 } UNICODE_STRING;
 
-/**
- * @struct _CLIENT_ID
- * @brief Идентификаторы процесса и потока.
- */
 typedef struct _CLIENT_ID {
     HANDLE UniqueProcess;
     HANDLE UniqueThread;
 } CLIENT_ID;
 
-/**
- * @struct _SYSTEM_THREAD_INFORMATION
- * @brief Статистика потока.
- */
 typedef struct _SYSTEM_THREAD_INFORMATION {
     LARGE_INTEGER KernelTime;
     LARGE_INTEGER UserTime;
@@ -63,10 +57,6 @@ typedef struct _SYSTEM_THREAD_INFORMATION {
     ULONG ThreadWaitReason;
 } SYSTEM_THREAD_INFORMATION, * PSYSTEM_THREAD_INFORMATION;
 
-/**
- * @struct _VM_COUNTERS_EX
- * @brief Счетчики виртуальной памяти.
- */
 typedef struct _VM_COUNTERS_EX {
     SIZE_T PeakVirtualSize;
     SIZE_T VirtualSize;
@@ -82,10 +72,6 @@ typedef struct _VM_COUNTERS_EX {
     SIZE_T PrivateUsage;
 } VM_COUNTERS_EX;
 
-/**
- * @struct _SYSTEM_PROCESS_INFORMATION
- * @brief Структура с данными процесса (Native API).
- */
 typedef struct _SYSTEM_PROCESS_INFORMATION {
     ULONG NextEntryOffset;
     ULONG ThreadCount;
@@ -106,13 +92,9 @@ typedef struct _SYSTEM_PROCESS_INFORMATION {
     VM_COUNTERS_EX VirtualMemoryCounters;
     SIZE_T PrivatePageCount;
     IO_COUNTERS IoCounters;
-    SYSTEM_THREAD_INFORMATION ThreadInfos; // Первый элемент в массиве потоков
+    SYSTEM_THREAD_INFORMATION ThreadInfos;
 } SYSTEM_PROCESS_INFORMATION, * PSYSTEM_PROCESS_INFORMATION;
 
-/**
- * @typedef pfnNtQuerySystemInformation
- * @brief Сигнатура функции NtQuerySystemInformation.
- */
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
     PVOID SystemInformation,
@@ -120,10 +102,8 @@ typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     PULONG ReturnLength
     );
 
-/**
- * @struct ProcessHistoricalSnapshot
- * @brief Хранит предыдущие значения для расчета динамики (CPU, I/O).
- */
+// --- Data Structures ---
+
 struct ProcessHistoricalSnapshot {
     ULONGLONG lastKernelTime = 0;
     ULONGLONG lastUserTime = 0;
@@ -133,310 +113,296 @@ struct ProcessHistoricalSnapshot {
     std::chrono::steady_clock::time_point lastSampleTime;
 };
 
-/**
- * @struct ProcessKey
- * @brief Уникальный ключ для индексации в БД. Использует PID + CreateTime.
- */
 struct ProcessKey {
     DWORD pid;
     LARGE_INTEGER createTime;
 
-    /**
-     * @brief Оператор сравнения для использования в std::map.
-     */
-    bool operator<(const ProcessKey& other) const {
-        if (pid != other.pid) return pid < other.pid;
-        return createTime.QuadPart < other.createTime.QuadPart;
+    bool operator==(const ProcessKey& other) const {
+        return pid == other.pid && createTime.QuadPart == other.createTime.QuadPart;
     }
 };
 
-/**
- * @struct ProcessRecord
- * @brief Полный набор данных процесса для сохранения в БД.
- */
-struct ProcessRecord {
-    std::wstring processName;            ///< Имя процесса
-    SYSTEM_PROCESS_INFORMATION procInfo; ///< Структура данных процесса
-    VM_COUNTERS_EX vmCounters;           ///< Статистика памяти
-    ProcessHistoricalSnapshot history;   ///< Исторические данные (для дельт)
-    std::chrono::steady_clock::time_point lastUpdate; ///< Метка времени записи
+
+struct ProcessKeyHasher {
+    std::size_t operator()(const ProcessKey& k) const {
+        return std::hash<DWORD>{}(k.pid) ^ (std::hash<long long>{}(k.createTime.QuadPart) << 1);
+    }
 };
 
-/**
- * @class SystemPerformanceTelemetryMonitor
- * @brief Класс мониторинга, осуществляющий сбор данных и управление БД.
- */
+struct ProcessRecord {
+    std::wstring processName;
+    SYSTEM_PROCESS_INFORMATION procInfo;
+    ProcessHistoricalSnapshot history;
+    std::chrono::steady_clock::time_point lastUpdate;
+    unsigned int visitCount = 0;
+
+
+    struct Sample {
+        std::chrono::steady_clock::time_point time;
+        ULONGLONG kernelTime;
+        ULONGLONG userTime;
+    };
+
+    std::vector<Sample> historyBuffer; // Буфер на 2700 записей
+    size_t historyIndex = 0;           // Текущая позиция записи
+    bool isBufferFull = false;         // Заполнился ли буфер хотя бы раз
+
+    ProcessRecord() {
+        historyBuffer.resize(2700); // Резервируем память сразу при создании
+    }
+
+};
+
+// --- Telemetry Monitor ---
+
 class SystemPerformanceTelemetryMonitor {
 private:
+    mutable std::mutex m_mutex;
     pfnNtQuerySystemInformation m_pfnNtQuerySystemInformation = nullptr;
     std::vector<BYTE> m_telemetryBuffer;
-    std::map<ProcessKey, ProcessRecord> m_processDatabase; ///< Основное хранилище
-    DWORD m_logicalProcessorCount = 1;
+    SYSTEM_INFO m_sysInfo;
 
-    /**
-     * @brief Динамическая загрузка функции из ntdll.
-     */
+    // БД: Ключ - уникальный процесс, Значение - его данные
+    std::unordered_map<ProcessKey, ProcessRecord, ProcessKeyHasher> m_processDatabase;
+
+    // Индекс для защиты от PID Reuse: Какой CreateTime сейчас "актуален" для этого PID
+    std::unordered_map<DWORD, LARGE_INTEGER> m_activePidMap;
+
     void LocateNativeEntryPoints() {
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll) {
             m_pfnNtQuerySystemInformation = reinterpret_cast<pfnNtQuerySystemInformation>(
-                GetProcAddress(hNtdll, "NtQuerySystemInformation")
-                );
+                GetProcAddress(hNtdll, "NtQuerySystemInformation"));
         }
     }
 
-    /**
-     * @brief Определение топологии процессора для расчетов.
-     */
-    void RetrieveProcessorTopology() {
-        SYSTEM_INFO sysInfo;
-        GetSystemInfo(&sysInfo);
-        m_logicalProcessorCount = sysInfo.dwNumberOfProcessors;
-    }
-
 public:
-    /**
-     * @brief Конструктор инициализации.
-     */
     SystemPerformanceTelemetryMonitor() {
         LocateNativeEntryPoints();
-        RetrieveProcessorTopology();
-        m_telemetryBuffer.resize(1024 * 1024); // Начальный буфер 1MB
+        GetSystemInfo(&m_sysInfo);
+        m_telemetryBuffer.resize(1024 * 1024 * 2); // 2MB начальный буфер
+        m_processDatabase.reserve(500); // Оптимизация аллокации
     }
 
-    /**
-     * @brief Выполнение запроса к системе и обновление БД.
-     */
     void ExecuteQueryAndProcess() {
         if (!m_pfnNtQuerySystemInformation) return;
 
         ULONG requiredSize = 0;
-        NTSTATUS status;
 
-        // Цикл расширения буфера, если данных больше, чем выделено
-        while (true) {
+        NTSTATUS status = m_pfnNtQuerySystemInformation(
+            SystemProcessInformation,
+            m_telemetryBuffer.data(),
+            static_cast<ULONG>(m_telemetryBuffer.size()),
+            &requiredSize
+        );
+
+        if (status == STATUS_INFO_LENGTH_MISMATCH) {
+            m_telemetryBuffer.resize(requiredSize + 1024 * 1024); ///< @todo тут возможно надо сделать более умный ресайз, иначе может падать при долгой работе
+
             status = m_pfnNtQuerySystemInformation(
                 SystemProcessInformation,
                 m_telemetryBuffer.data(),
                 static_cast<ULONG>(m_telemetryBuffer.size()),
                 &requiredSize
             );
-
-            if (status == STATUS_INFO_LENGTH_MISMATCH) {
-                ULONG targetSize = (requiredSize > 0) ? (requiredSize + 65536) : static_cast<ULONG>(m_telemetryBuffer.size() * 1.5);
-                m_telemetryBuffer.resize(targetSize);
-            }
-            else {
-                break;
-            }
         }
 
         if (status == STATUS_SUCCESS) {
             ParseBuffer();
+            PruneDatabase();
         }
     }
 
-    /**
-     * @brief Парсинг сырого буфера и обновление записей в БД.
-     */
     void ParseBuffer() {
+        std::lock_guard<std::mutex> lock(m_mutex);
         auto currentTimePoint = std::chrono::steady_clock::now();
         BYTE* pCurrentPosition = m_telemetryBuffer.data();
 
         while (pCurrentPosition) {
-            auto* pProcessData = reinterpret_cast<SYSTEM_PROCESS_INFORMATION*>(pCurrentPosition);
-            DWORD pid = static_cast<DWORD>(reinterpret_cast<uintptr_t>(pProcessData->UniqueProcessId));
+            auto* pData = reinterpret_cast<SYSTEM_PROCESS_INFORMATION*>(pCurrentPosition);
+            DWORD pid = static_cast<DWORD>(reinterpret_cast<uintptr_t>(pData->UniqueProcessId));
 
-            // Обработка имени
-            std::wstring processName = L"System Idle Process";
-            if (pid != 0) {
-                if (pProcessData->ImageName.Buffer != nullptr && pProcessData->ImageName.Length > 0) {
-                    processName = std::wstring(pProcessData->ImageName.Buffer, pProcessData->ImageName.Length / sizeof(wchar_t));
+            ProcessKey key{ pid, pData->CreateTime };
+
+            // 1. Если процесса нет — создаем (ProcessRecord инициализирует буфер в конструкторе)
+            auto& record = m_processDatabase[key];
+            if (record.processName.empty()) { // Простая проверка на новую запись
+                if (pid == 0) record.processName = L"System Idle Process";
+                else if (pData->ImageName.Buffer)
+                    record.processName = std::wstring(pData->ImageName.Buffer, pData->ImageName.Length / sizeof(wchar_t));
+                else record.processName = L"Unknown";
+            }
+
+            // 2. Добавляем текущие данные в циклический буфер
+            // Теперь мы просто пишем в ячейку по индексу и двигаем его
+            auto& sample = record.historyBuffer[record.historyIndex];
+            sample.time = currentTimePoint;
+            sample.kernelTime = pData->KernelTime.QuadPart;
+            sample.userTime = pData->UserTime.QuadPart;
+
+            record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
+            if (record.historyIndex == 0) record.isBufferFull = true;
+
+            // 3. Обновляем текущие данные
+            record.procInfo = *pData;
+            record.lastUpdate = currentTimePoint;
+            record.visitCount++;
+
+            // Обновляем индекс актуальности
+            m_activePidMap[pid] = pData->CreateTime;
+
+            if (pData->NextEntryOffset == 0) break;
+            pCurrentPosition += pData->NextEntryOffset;
+        }
+    }
+
+    // Удаление "мертвых" процессов (которые не обновлялись 5 секунд)
+    void PruneDatabase() {
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
+            if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
+                // Если запись в базе - это тот же процесс, что и активный в индексе, удаляем из индекса
+                auto activeIt = m_activePidMap.find(it->first.pid);
+                if (activeIt != m_activePidMap.end() && activeIt->second.QuadPart == it->first.createTime.QuadPart) {
+                    m_activePidMap.erase(activeIt);
                 }
-                else {
-                    processName = L"System/Unknown";
-                }
+                it = m_processDatabase.erase(it);
             }
-
-            // Формируем ключ
-            ProcessKey key{ pid, pProcessData->CreateTime };
-
-            // Подготовка записи для сохранения
-            ProcessRecord newRecord;
-            newRecord.processName = processName;
-            newRecord.procInfo = *pProcessData;
-            newRecord.vmCounters = pProcessData->VirtualMemoryCounters;
-            newRecord.lastUpdate = currentTimePoint;
-
-            // Логика расчета дельт (история)
-            if (m_processDatabase.count(key)) {
-                newRecord.history = m_processDatabase[key].history;
-            }
-
-            // Обновляем исторические данные
-            newRecord.history.lastKernelTime = pProcessData->KernelTime.QuadPart;
-            newRecord.history.lastUserTime = pProcessData->UserTime.QuadPart;
-            newRecord.history.lastReadBytes = pProcessData->IoCounters.ReadTransferCount;
-            newRecord.history.lastWriteBytes = pProcessData->IoCounters.WriteTransferCount;
-            newRecord.history.lastOtherBytes = pProcessData->IoCounters.OtherTransferCount;
-            newRecord.history.lastSampleTime = currentTimePoint;
-
-            // Запись в базу
-            m_processDatabase[key] = newRecord;
-
-            // Переход к следующему элементу
-            if (pProcessData->NextEntryOffset == 0) break;
-            pCurrentPosition += pProcessData->NextEntryOffset;
-        }
-    }
-
-    /**
-     * @brief Возвращает доступ к базе данных для внешней программы.
-     */
-    const std::map<ProcessKey, ProcessRecord>& GetProcessDatabase() const {
-        return m_processDatabase;
-    }
-
-    /**
-     * @brief Находит все записи процессов по заданному PID.
-     * @param pid Идентификатор процесса для поиска.
-     * @return Вектор пар {имя процесса, время создания}.
-     */
-    std::vector<std::pair<std::wstring, LARGE_INTEGER>> GetProcessesByPid(DWORD pid) const {
-        std::vector<std::pair<std::wstring, LARGE_INTEGER>> results;
-
-        // Создаем ключ с PID и нулевым временем, чтобы найти первую запись
-        ProcessKey searchKey{ pid, {0} };
-
-        // Используем lower_bound для быстрого перехода к первому вхождению PID
-        auto it = m_processDatabase.lower_bound(searchKey);
-
-        // Перебираем записи, пока PID совпадает (так как map отсортирован по PID)
-        while (it != m_processDatabase.end() && it->first.pid == pid) {
-            results.push_back({ it->second.processName, it->first.createTime });
-            ++it;
-        }
-
-        return results;
-    }
-
-    /**
-     * @brief Возвращает PID процесса по порядковому номеру записи в базе.
-     * @param index Порядковый номер записи (0-based).
-     * @return PID процесса, если индекс валиден, иначе 0.
-     */
-    DWORD GetPidByIndex(size_t index) const {
-        if (index >= m_processDatabase.size()) {
-            return 0; // Ошибка: индекс вне диапазона
-        }
-        auto it = m_processDatabase.begin();
-        std::advance(it, index); // Переход к i-тому элементу
-        return it->first.pid;
-    }
-
-    /**
-     * @brief Находит PID процесса, который был обновлен самым последним.
-     * @return PID процесса или 0, если база пуста.
-     */
-    DWORD GetLastUpdatedPid() const {
-        if (m_processDatabase.empty()) return 0;
-
-        // Используем явное указание типа std::chrono::steady_clock::time_point
-        // Вместо ::min() используем пустой конструктор (он равен 0)
-        std::chrono::steady_clock::time_point latestTime;
-        DWORD latestPid = 0;
-
-        // Используем классический итератор map (для совместимости со старыми стандартами)
-        for (std::map<ProcessKey, ProcessRecord>::const_iterator it = m_processDatabase.begin();
-            it != m_processDatabase.end(); ++it) {
-
-            // it->second — это доступ к записи (record)
-            // it->first — это доступ к ключу (key)
-            if (it->second.lastUpdate > latestTime) {
-                latestTime = it->second.lastUpdate;
-                latestPid = it->first.pid;
+            else {
+                ++it;
             }
         }
-        return latestPid;
     }
 
-    /**
-     * @brief Находит PID процесса, который был создан в системе самым последним.
-     * @return PID процесса или 0, если база пуста.
-     */
-    DWORD GetNewestProcessPid() const {
-        if (m_processDatabase.empty()) return 0;
+    // Быстрый доступ к активному процессу по PID ($O(1)$)
+    bool GetActiveRecordByPid(DWORD pid, ProcessRecord& outRecord) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_activePidMap.find(pid);
+        if (it == m_activePidMap.end()) return false;
 
-        LARGE_INTEGER maxCreateTime;
-        maxCreateTime.QuadPart = 0; // Инициализация минимальным значением
-        DWORD latestPid = 0;
-
-        for (std::map<ProcessKey, ProcessRecord>::const_iterator it = m_processDatabase.begin();
-            it != m_processDatabase.end(); ++it) {
-
-            // Сравниваем CreateTime процесса с текущим максимумом
-            if (it->first.createTime.QuadPart > maxCreateTime.QuadPart) {
-                maxCreateTime = it->first.createTime;
-                latestPid = it->first.pid;
-            }
+        ProcessKey key{ pid, it->second };
+        auto dbIt = m_processDatabase.find(key);
+        if (dbIt != m_processDatabase.end()) {
+            outRecord = dbIt->second;
+            return true;
         }
-        return latestPid;
+        return false;
     }
 
-    /**
-     * @brief Находит уникальный ключ процесса, который был создан самым последним.
-     */
-    ProcessKey GetNewestProcessKey() const {
-        ProcessKey newestKey = { 0, {0} };
-        LARGE_INTEGER maxCreateTime;
-        maxCreateTime.QuadPart = 0;
 
-        for (std::map<ProcessKey, ProcessRecord>::const_iterator it = m_processDatabase.begin();
-            it != m_processDatabase.end(); ++it) {
+    void DisplayTopProcesses(int topCount) {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-            if (it->first.createTime.QuadPart > maxCreateTime.QuadPart) {
-                maxCreateTime = it->first.createTime;
-                newestKey = it->first;
+        struct ProcessDisplay {
+            DWORD pid;
+            std::wstring name;
+            double cpuUsage;
+            unsigned int visitCount;
+        };
+
+        std::vector<ProcessDisplay> list;
+        auto now = std::chrono::steady_clock::now();
+
+        unsigned long long totalGlobalRecords = 0;
+        size_t totalMemoryUsage = 0;
+
+        // Используем классический цикл, чтобы избежать ошибок с C++17
+        for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ++it) {
+            const auto& key = it->first;
+            const auto& record = it->second;
+
+            totalGlobalRecords += record.visitCount;
+            totalMemoryUsage += sizeof(key) + sizeof(record) +
+                (record.processName.capacity() * sizeof(wchar_t)) +
+                (record.historyBuffer.capacity() * sizeof(ProcessRecord::Sample));
+
+            double cpu = 0.0;
+
+            // Расчет CPU через кольцевой буфер
+            size_t oldestIndex = record.isBufferFull ? record.historyIndex : 0;
+            const auto& oldSample = record.historyBuffer[oldestIndex];
+
+            // Используем duration_cast правильно
+            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(now - oldSample.time).count();
+            double duration100ns = static_cast<double>(duration) / 100.0;
+
+            if (duration100ns > 0) {
+                ULONGLONG deltaK = record.procInfo.KernelTime.QuadPart - oldSample.kernelTime;
+                ULONGLONG deltaU = record.procInfo.UserTime.QuadPart - oldSample.userTime;
+                double rawUsage = ((static_cast<double>(deltaK) + static_cast<double>(deltaU)) / duration100ns) * 100.0;
+                cpu = rawUsage / static_cast<double>(m_sysInfo.dwNumberOfProcessors);
             }
+
+            // Явно приводим типы в конструктор, чтобы не было "narrowing conversion"
+            list.push_back({ (DWORD)key.pid, record.processName, cpu, (unsigned int)record.visitCount });
         }
-        return newestKey;
+
+        // 2. Сортируем
+        std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
+            return a.cpuUsage > b.cpuUsage;
+            });
+
+        // 3. Вывод
+        std::wcout << L"\n--- ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
+        std::wcout << L"Всего уникальных: " << m_processDatabase.size()
+            << L" | Всего записей: " << totalGlobalRecords
+            << L" | Память БД: ~" << (totalMemoryUsage / 1024) << L" KB" << std::endl;
+
+        std::wcout << std::left << std::setw(8) << L"PID"
+            << std::setw(25) << L"Name"
+            << std::setw(10) << L"CPU%"
+            << std::setw(10) << L"Records" << std::endl;
+
+        std::wcout << std::wstring(55, L'-') << std::endl;
+
+        size_t count = std::min(list.size(), (size_t)topCount);
+        for (size_t i = 0; i < count; ++i) {
+            std::wcout << std::left << std::setw(8) << list[i].pid
+                << std::setw(25) << list[i].name.substr(0, 24)
+                << std::setw(10) << std::fixed << std::setprecision(2) << list[i].cpuUsage
+                << std::setw(10) << list[i].visitCount << std::endl;
+        }
     }
+
 };
 
-/**
- * @brief Точка входа.
- */
 int main() {
-    std::setlocale(LC_ALL, "Russian");
+    // 1. Настройка окружения
+    std::setlocale(LC_ALL, ""); // Для корректного вывода русских имен процессов
+    EnableAnsiSupport();        // Включаем поддержку ANSI для высокой скорости отрисовки
 
     SystemPerformanceTelemetryMonitor monitor;
 
-    std::cout << "Запуск сбора телеметрии..." << std::endl;
-    monitor.ExecuteQueryAndProcess();
+    // Переменные для замера частоты (Hz)
+    auto lastTime = std::chrono::steady_clock::now();
+    int frameCounter = 0;
+    double currentHz = 0.0;
 
+    std::cout << "Monitoring system... Press Ctrl+C to exit." << std::endl;
 
     while (true) {
         monitor.ExecuteQueryAndProcess();
 
-        // 1. Получаем ключ последнего процесса
-        ProcessKey key = monitor.GetNewestProcessKey();
+        // ANSI-код "\033[H" перемещает курсор в верхний левый угол без очистки всего буфера
+        std::cout << "\033[H";
 
-        // 2. Получаем запись из базы по этому ключу
-        const auto& db = monitor.GetProcessDatabase();
-        auto it = db.find(key);
+       monitor.DisplayTopProcesses(30);
 
-        if (it != db.end()) {
-            std::cout << "Последний запущенный PID: " << it->first.pid << " Его имя: ";
-
-            // Вывод wstring требует использования std::wcout
-            std::wcout << it->second.processName << std::endl;
+        // --- Блок замера частоты (Hz) ---
+        frameCounter++;
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = now - lastTime;
+        if (elapsed.count() >= 1.0) {
+            currentHz = frameCounter / elapsed.count();
+            frameCounter = 0;
+            lastTime = now;
         }
 
-        std::cout << "Всего записей в базе: " << monitor.GetProcessDatabase().size() << std::endl;
+        std::wcout << L"\n[Performance: " << currentHz << L" Hz]" << std::endl;
 
-        Sleep(200);
+        // Минимальная задержка, чтобы не грузить CPU вхолостую
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-
 
     return 0;
 }
