@@ -408,72 +408,89 @@ public:
             std::wstring name;
             double cpuUsage;
             unsigned int visitCount;
-            // Новые поля для отображения
+            // Все поля из ProcessTelemetry
+            DWORD ppid;
+            DWORD threadCount;
+            DWORD handleCount;
+            SIZE_T privateMB;
+            SIZE_T virtualMB;
             SIZE_T workingSetMB;
-            ULONG threads;
-            ULONG handles;
+            ULONG pageFaultCount;
+            SIZE_T pagedPoolMB;
+            SIZE_T nonPagedPoolMB;
+            ULONG sessionId;
         };
 
         std::vector<ProcessDisplay> list;
-        unsigned long long totalGlobalRecords = 0;
-        size_t totalMemoryUsage = 0;
 
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ++it) {
             const auto& key = it->first;
             const auto& record = it->second;
 
-            totalGlobalRecords += record.visitCount;
-            totalMemoryUsage += sizeof(key) + sizeof(record) +
-                (record.processName.capacity() * sizeof(wchar_t)) +
-                (record.historyBuffer.capacity() * sizeof(ProcessTelemetry));
-
-            // 1. Расчет CPU (как и просил)
             double cpu = CalculateCpuUsage(record, 10);
-
-            // 2. Получаем последние метрики из буфера
             size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
             const auto& latest = record.historyBuffer[latestIdx];
 
-            // 3. Сохраняем в список для вывода
             list.push_back({
                 (DWORD)key.pid,
                 record.processName,
                 cpu,
                 (unsigned int)record.visitCount,
-                latest.workingSetSize / 1024 / 1024, // RAM в MB
+                latest.ppid,
                 latest.threadCount,
-                latest.handleCount
+                latest.handleCount,
+                latest.privatePageCount / 1024 / 1024,
+                latest.virtualSize / 1024 / 1024,
+                latest.workingSetSize / 1024 / 1024,
+                latest.pageFaultCount,
+                latest.pagedPoolUsage / 1024 / 1024,
+                latest.nonPagedPoolUsage / 1024 / 1024,
+                latest.sessionId
                 });
         }
 
-        // Сортировка
         std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
             return a.cpuUsage > b.cpuUsage;
             });
 
-        // --- Вывод ---
-        std::wcout << L"\n--- ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
-        std::wcout << L"Всего уникальных: " << m_processDatabase.size()
-            << L" | Память БД: ~" << (totalMemoryUsage / 1024) << L" KB" << std::endl;
+        // Вывод
+        std::wcout << L"\n--- ПОЛНАЯ ТЕЛЕМЕТРИЯ ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
 
-        // Расширенные заголовки
-        std::wcout << std::left << std::setw(8) << L"PID"
-            << std::setw(20) << L"Name"
-            << std::setw(8) << L"CPU%"
-            << std::setw(8) << L"RAM(MB)"
-            << std::setw(8) << L"Threads"
-            << std::setw(8) << L"Handles" << std::endl;
+        // Заголовки (используем компактные названия для колонок)
+        // PID | Name | CPU% | PPID | Sess | Thr | Hnd | Priv | Virt | WS | Faults | Paged | NonPg
+        std::wcout << std::left
+            << std::setw(7) << L"PID"
+            << std::setw(15) << L"Name"
+            << std::setw(6) << L"CPU%"
+            << std::setw(6) << L"PPID"
+            << std::setw(5) << L"Sess"
+            << std::setw(5) << L"Thr"
+            << std::setw(6) << L"Hnd"
+            << std::setw(6) << L"Priv"
+            << std::setw(6) << L"Virt"
+            << std::setw(6) << L"WS"
+            << std::setw(8) << L"Faults"
+            << std::setw(6) << L"Paged"
+            << std::setw(6) << L"NonPg" << std::endl;
 
-        std::wcout << std::wstring(60, L'-') << std::endl;
+        std::wcout << std::wstring(90, L'-') << std::endl;
 
         size_t count = std::min(list.size(), (size_t)topCount);
         for (size_t i = 0; i < count; ++i) {
-            std::wcout << std::left << std::setw(8) << list[i].pid
-                << std::setw(20) << list[i].name.substr(0, 19)
-                << std::setw(8) << std::fixed << std::setprecision(1) << list[i].cpuUsage
-                << std::setw(8) << list[i].workingSetMB
-                << std::setw(8) << list[i].threads
-                << std::setw(8) << list[i].handles << std::endl;
+            std::wcout << std::left
+                << std::setw(7) << list[i].pid
+                << std::setw(15) << list[i].name.substr(0, 14)
+                << std::setw(6) << std::fixed << std::setprecision(1) << list[i].cpuUsage
+                << std::setw(6) << list[i].ppid
+                << std::setw(5) << list[i].sessionId
+                << std::setw(5) << list[i].threadCount
+                << std::setw(6) << list[i].handleCount
+                << std::setw(6) << list[i].privateMB
+                << std::setw(6) << list[i].virtualMB
+                << std::setw(6) << list[i].workingSetMB
+                << std::setw(8) << list[i].pageFaultCount
+                << std::setw(6) << list[i].pagedPoolMB
+                << std::setw(6) << list[i].nonPagedPoolMB << std::endl;
         }
     }
 
@@ -499,7 +516,7 @@ int main() {
         // ANSI-код "\033[H" перемещает курсор в верхний левый угол без очистки всего буфера
         std::cout << "\033[H";
 
-       monitor.DisplayTopProcesses(30);
+       monitor.DisplayTopProcesses(15);
 
         // --- Блок замера частоты (Hz) ---
         frameCounter++;
