@@ -132,33 +132,7 @@ struct ProcessHistoricalSnapshot {
     std::chrono::steady_clock::time_point lastSampleTime;
 };
 
-struct ProcessSnapshot {
-    // Basic Info
-    DWORD pid;
-    DWORD ppid;
 
-    // Threads & Handles
-    DWORD numberOfThreads;
-    DWORD handleCount;
-
-    // Session
-    ULONG sessionId;
-
-    // Memory Counters
-    SIZE_T privatePageCount;
-    SIZE_T virtualSize;
-    SIZE_T workingSetSize;
-
-    // Page Faults
-    ULONG pageFaultCount;
-
-    // Pool Usage
-    SIZE_T pagedPoolUsage;
-    SIZE_T nonPagedPoolUsage;
-
-    // Computed (из буфера истории)
-    double lastCalculatedCpu;
-};
 
 
 struct ProcessKey {
@@ -195,6 +169,7 @@ struct ProcessTelemetry {
     SIZE_T pagedPoolUsage;
     SIZE_T nonPagedPoolUsage;
     ULONG sessionId;
+    ULONG contextSwitches;
 };
 
 
@@ -309,6 +284,17 @@ public:
                 else record.processName = L"Unknown";
             }
 
+            PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>(
+                reinterpret_cast<BYTE*>(pData) + 0x100 
+                );
+
+            ULONG totalContextSwitches = 0;
+            // Суммируем переключения контекста всех потоков этого процесса
+            for (ULONG i = 0; i < pData->NumberOfThreads; i++) {
+                totalContextSwitches += pThreads[i].ContextSwitches;
+            }
+            // ------------------------------------
+
             auto& entry = record.historyBuffer[record.historyIndex];
 
             entry.time = currentTimePoint;
@@ -319,14 +305,16 @@ public:
             entry.threadCount = pData->NumberOfThreads;
             entry.handleCount = pData->HandleCount;
 
-            // ПРЯМОЕ ОБРАЩЕНИЕ (без VirtualMemoryCounters)
-            entry.privatePageCount = pData->PrivatePageCount;
+            entry.privatePageCount = pData->PrivatePageCount;///< Соответсвует полю Reads I/O для system informer
             entry.virtualSize = pData->VirtualMemoryCounters.VirtualSize;
             entry.workingSetSize = pData->VirtualMemoryCounters.WorkingSetSize;
             entry.pageFaultCount = (ULONG)pData->VirtualMemoryCounters.PageFaultCount;
             entry.pagedPoolUsage = pData->VirtualMemoryCounters.QuotaPagedPoolUsage;
             entry.nonPagedPoolUsage = pData->VirtualMemoryCounters.QuotaNonPagedPoolUsage;
             entry.sessionId = pData->SessionId;
+
+            // Записываем собранную метрику
+            entry.contextSwitches = totalContextSwitches;
 
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
@@ -343,6 +331,7 @@ public:
 
     // Удаление "мертвых" процессов (которые не обновлялись 5 секунд)
     void PruneDatabase() {
+        std::lock_guard<std::mutex> lock(m_mutex);
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
             if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
@@ -415,8 +404,6 @@ public:
     void DisplayTopProcesses(int topCount) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
-
-
         struct ProcessDisplay {
             DWORD pid;
             std::wstring name;
@@ -429,6 +416,9 @@ public:
             SIZE_T virtualMB;
             SIZE_T workingSetMB;
             ULONG pageFaultCount;
+            SIZE_T pagedPool;
+            SIZE_T nonPagedPool;
+            ULONG contextSwitches;
         };
 
         std::vector<ProcessDisplay> list;
@@ -441,7 +431,6 @@ public:
             size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
             const auto& latest = record.historyBuffer[latestIdx];
 
-            // Используем корректные пути доступа к полям через вложенную структуру
             list.push_back({
                 (DWORD)key.pid,
                 record.processName,
@@ -453,7 +442,10 @@ public:
                 latest.privatePageCount,
                 latest.virtualSize,
                 latest.workingSetSize,
-                (ULONG)latest.pageFaultCount
+                (ULONG)latest.pageFaultCount,
+                latest.pagedPoolUsage,
+                latest.nonPagedPoolUsage,
+                latest.contextSwitches
                 });
 
             totalHistorySnapshots += record.historyBuffer.size();
@@ -468,23 +460,24 @@ public:
         std::wcout << L"DATABASE STATS:" << std::endl;
         std::wcout << L"Total Processes tracked: " << m_processDatabase.size() << std::endl;
         std::wcout << L"Total history snapshots: " << totalHistorySnapshots << std::endl;
-        std::wcout << L"Approx. memory footprint: " << FormatMemory(totalHistorySnapshots * sizeof(SYSTEM_PROCESS_INFORMATION)) << std::endl;
+        // Используем размер вашей новой структуры ProcessTelemetry
+        std::wcout << L"Approx. memory footprint: " << FormatMemory(totalHistorySnapshots * sizeof(ProcessTelemetry)) << std::endl;
         std::wcout << L"========================================================\n" << std::endl;
 
-        std::wcout << L"--- ПОЛНАЯ ТЕЛЕМЕТРИЯ ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
+        std::wcout << L"--- ТОП-" << topCount << L" ПРОЦЕССОВ (Расширенная телеметрия) ---\n";
 
-        // 11 колонок
+        // Заголовок
         std::wcout << std::left
             << std::setw(7) << L"PID"
             << std::setw(16) << L"Name"
             << std::setw(7) << L"CPU%"
-            << std::setw(6) << L"PPID"
-            << std::setw(5) << L"Sess"
             << std::setw(5) << L"Thr"
             << std::setw(6) << L"Hnd"
-            << std::setw(11) << L"Priv"
-            << std::setw(11) << L"Virt"
-            << std::setw(11) << L"WS"
+            << std::setw(10) << L"Priv"
+            << std::setw(10) << L"WS"
+            << std::setw(10) << L"Paged"
+            << std::setw(10) << L"NPaged"
+            << std::setw(9) << L"CtxSw"
             << L"Faults" << std::endl;
 
         std::wcout << std::wstring(105, L'-') << std::endl;
@@ -494,24 +487,17 @@ public:
             std::wcout << std::left
                 << std::setw(7) << list[i].pid
                 << std::setw(16) << list[i].name.substr(0, 15)
-
-                // 1. Выводим CPU
-                << std::setw(7) << std::fixed << std::setprecision(1) << list[i].cpuUsage
-
-                // 2. СБРОС ФОРМАТИРОВАНИЯ!
-                // std::defaultfloat сбрасывает fixed/scientific, 
-                // а setprecision(0) убирает дробную часть
+                << std::fixed << std::setprecision(1) << std::setw(7) << list[i].cpuUsage
                 << std::defaultfloat << std::setprecision(0)
-
-                << std::setw(6) << list[i].ppid
-                << std::setw(5) << list[i].sessionId
                 << std::setw(5) << list[i].threadCount
                 << std::setw(6) << list[i].handleCount
-                << std::setw(11) << FormatMemory(list[i].privateMB)
-                << std::setw(11) << FormatMemory(list[i].virtualMB)
-                << std::setw(11) << FormatMemory(list[i].workingSetMB)
-                << list[i].pageFaultCount // Теперь должно выводиться как обычное целое число
-                << L"\033[K" // <--- ДОБАВИТЬ ЭТО! Стирает остаток строки до конца
+                << std::setw(10) << FormatMemory(list[i].privateMB)
+                << std::setw(10) << FormatMemory(list[i].workingSetMB)
+                << std::setw(10) << FormatMemory(list[i].pagedPool)
+                << std::setw(10) << FormatMemory(list[i].nonPagedPool)
+                << std::setw(9) << list[i].contextSwitches
+                << list[i].pageFaultCount
+                << L"\033[K"
                 << std::endl;
         }
     }
