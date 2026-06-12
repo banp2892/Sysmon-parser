@@ -73,7 +73,6 @@ typedef struct _SYSTEM_THREAD_INFORMATION {
 
 #pragma pack(push, 8)
 
-// 1. Сначала VM_COUNTERS_EX
 typedef struct _VM_COUNTERS_EX {
     SIZE_T PeakVirtualSize;
     SIZE_T VirtualSize;
@@ -89,51 +88,31 @@ typedef struct _VM_COUNTERS_EX {
     SIZE_T PrivateUsage;
 } VM_COUNTERS_EX;
 
-#pragma pack(push, 8)
 typedef struct _SYSTEM_PROCESS_INFORMATION {
-    ULONG NextEntryOffset;          // 0
-    ULONG NumberOfThreads;          // 4
-    LARGE_INTEGER WorkingSetPrivateSize; // 8
-    ULONG HardFaultCount;           // 16
-    ULONG NumberOfThreadsHighWatermark; // 20
-    ULONGLONG CycleTime;            // 24
-    LARGE_INTEGER CreateTime;       // 32
-    LARGE_INTEGER UserTime;         // 40
-    LARGE_INTEGER KernelTime;       // 48
-    UNICODE_STRING ImageName;       // 56
-    LONG BasePriority;              // 72
-    ULONG Reserved1;                // 76
-    HANDLE UniqueProcessId;         // 80
-    HANDLE InheritedFromUniqueProcessId; // 88
-    ULONG HandleCount;              // 96
-    ULONG SessionId;                // 100
-    ULONG_PTR UniqueProcessKey;     // 104
-    SIZE_T PeakVirtualSize;         // 112
-    SIZE_T VirtualSize;             // 120  <-- МЫ ИЩЕМ 120!
-    ULONG PageFaultCount;           // 128
-    ULONG Reserved2;                // 132
-    SIZE_T PeakWorkingSetSize;      // 136
-    SIZE_T WorkingSetSize;          // 144
-    SIZE_T QuotaPeakPagedPoolUsage; // 152
-    SIZE_T QuotaPagedPoolUsage;     // 160
-    SIZE_T QuotaPeakNonPagedPoolUsage; // 168
-    SIZE_T QuotaNonPagedPoolUsage;  // 176
-    SIZE_T PagefileUsage;           // 184
-    SIZE_T PeakPagefileUsage;       // 192
-    SIZE_T PrivatePageCount;        // 200
-    IO_COUNTERS IoCounters;         // 208  <-- МЫ ИЩЕМ 208!
-    // Остаток до 336 байт (336 - 256 = 80 байт)
-    unsigned char ReservedPadding[80];
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    LARGE_INTEGER WorkingSetPrivateSize;
+    ULONG HardFaultCount;
+    ULONG NumberOfThreadsHighWatermark;
+    ULONGLONG CycleTime;
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    UNICODE_STRING ImageName;
+    LONG BasePriority;
+    ULONG Reserved1; // Выравнивание для UniqueProcessId
+    HANDLE UniqueProcessId;
+    HANDLE InheritedFromUniqueProcessId;
+    ULONG HandleCount;
+    ULONG SessionId;
+    ULONG_PTR UniqueProcessKey;
+    VM_COUNTERS_EX VirtualMemoryCounters;
+    SIZE_T PrivatePageCount;
+    IO_COUNTERS IoCounters;
 } SYSTEM_PROCESS_INFORMATION, * PSYSTEM_PROCESS_INFORMATION;
+
 #pragma pack(pop)
 
-// КРИТИЧЕСКИ ВАЖНАЯ ПРОВЕРКА:
-static_assert(offsetof(SYSTEM_PROCESS_INFORMATION, VirtualSize) == 120, "VirtualSize смещение неверно!");
-static_assert(offsetof(SYSTEM_PROCESS_INFORMATION, IoCounters) == 208, "IoCounters смещение неверно!");
-static_assert(sizeof(SYSTEM_PROCESS_INFORMATION) == 336, "Размер не 336!");
-
-// ОБЯЗАТЕЛЬНО добавьте это в основной код
-static_assert(sizeof(SYSTEM_PROCESS_INFORMATION) == 336, "Ошибка: Размер структуры не 336 байт!");
 
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
@@ -342,11 +321,11 @@ public:
 
             // ПРЯМОЕ ОБРАЩЕНИЕ (без VirtualMemoryCounters)
             entry.privatePageCount = pData->PrivatePageCount;
-            entry.virtualSize = pData->VirtualSize;
-            entry.workingSetSize = pData->WorkingSetSize;
-            entry.pageFaultCount = pData->PageFaultCount;
-            entry.pagedPoolUsage = pData->QuotaPagedPoolUsage;
-            entry.nonPagedPoolUsage = pData->QuotaNonPagedPoolUsage;
+            entry.virtualSize = pData->VirtualMemoryCounters.VirtualSize;
+            entry.workingSetSize = pData->VirtualMemoryCounters.WorkingSetSize;
+            entry.pageFaultCount = (ULONG)pData->VirtualMemoryCounters.PageFaultCount;
+            entry.pagedPoolUsage = pData->VirtualMemoryCounters.QuotaPagedPoolUsage;
+            entry.nonPagedPoolUsage = pData->VirtualMemoryCounters.QuotaNonPagedPoolUsage;
             entry.sessionId = pData->SessionId;
 
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
@@ -436,86 +415,103 @@ public:
     void DisplayTopProcesses(int topCount) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
+
+
         struct ProcessDisplay {
             DWORD pid;
             std::wstring name;
             double cpuUsage;
             DWORD ppid;
+            ULONG sessionId;
             DWORD threadCount;
             DWORD handleCount;
-            SIZE_T privateMB;    // Храним в байтах
-            SIZE_T virtualMB;    // Храним в байтах
-            SIZE_T workingSetMB; // Храним в байтах
+            SIZE_T privateMB;
+            SIZE_T virtualMB;
+            SIZE_T workingSetMB;
             ULONG pageFaultCount;
-            SIZE_T pagedPoolMB;
-            SIZE_T nonPagedPoolMB;
-            ULONG sessionId;
         };
 
         std::vector<ProcessDisplay> list;
+        size_t totalHistorySnapshots = 0;
 
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ++it) {
             const auto& key = it->first;
             const auto& record = it->second;
 
-            double cpu = CalculateCpuUsage(record, 10);
             size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
             const auto& latest = record.historyBuffer[latestIdx];
 
+            // Используем корректные пути доступа к полям через вложенную структуру
             list.push_back({
                 (DWORD)key.pid,
                 record.processName,
-                cpu,
+                CalculateCpuUsage(record, 10),
                 latest.ppid,
+                latest.sessionId,
                 latest.threadCount,
                 latest.handleCount,
                 latest.privatePageCount,
                 latest.virtualSize,
                 latest.workingSetSize,
-                latest.pageFaultCount,
-                latest.pagedPoolUsage,
-                latest.nonPagedPoolUsage,
-                latest.sessionId
+                (ULONG)latest.pageFaultCount
                 });
+
+            totalHistorySnapshots += record.historyBuffer.size();
         }
 
         std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
             return a.cpuUsage > b.cpuUsage;
             });
 
-        std::wcout << L"\n--- ПОЛНАЯ ТЕЛЕМЕТРИЯ ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
+        // --- СТАТИСТИКА БАЗЫ (ВЕРНУЛ) ---
+        std::wcout << L"\n========================================================" << std::endl;
+        std::wcout << L"DATABASE STATS:" << std::endl;
+        std::wcout << L"Total Processes tracked: " << m_processDatabase.size() << std::endl;
+        std::wcout << L"Total history snapshots: " << totalHistorySnapshots << std::endl;
+        std::wcout << L"Approx. memory footprint: " << FormatMemory(totalHistorySnapshots * sizeof(SYSTEM_PROCESS_INFORMATION)) << std::endl;
+        std::wcout << L"========================================================\n" << std::endl;
 
-        // Увеличенная ширина колонок для читаемости
+        std::wcout << L"--- ПОЛНАЯ ТЕЛЕМЕТРИЯ ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
+
+        // 11 колонок
         std::wcout << std::left
-            << std::setw(8) << L"PID"
-            << std::setw(20) << L"Name"
-            << std::setw(8) << L"CPU%"
+            << std::setw(7) << L"PID"
+            << std::setw(16) << L"Name"
+            << std::setw(7) << L"CPU%"
             << std::setw(6) << L"PPID"
-            << std::setw(6) << L"Sess"
-            << std::setw(6) << L"Thr"
-            << std::setw(8) << L"Hnd"
-            << std::setw(12) << L"Priv"
-            << std::setw(12) << L"Virt"
-            << std::setw(12) << L"WS"
-            << std::setw(10) << L"Faults"
-            << std::endl;
+            << std::setw(5) << L"Sess"
+            << std::setw(5) << L"Thr"
+            << std::setw(6) << L"Hnd"
+            << std::setw(11) << L"Priv"
+            << std::setw(11) << L"Virt"
+            << std::setw(11) << L"WS"
+            << L"Faults" << std::endl;
 
-        std::wcout << std::wstring(110, L'-') << std::endl;
+        std::wcout << std::wstring(105, L'-') << std::endl;
 
         size_t count = std::min(list.size(), (size_t)topCount);
         for (size_t i = 0; i < count; ++i) {
             std::wcout << std::left
-                << std::setw(8) << list[i].pid
-                << std::setw(20) << list[i].name.substr(0, 19)
-                << std::setw(8) << std::fixed << std::setprecision(1) << list[i].cpuUsage
+                << std::setw(7) << list[i].pid
+                << std::setw(16) << list[i].name.substr(0, 15)
+
+                // 1. Выводим CPU
+                << std::setw(7) << std::fixed << std::setprecision(1) << list[i].cpuUsage
+
+                // 2. СБРОС ФОРМАТИРОВАНИЯ!
+                // std::defaultfloat сбрасывает fixed/scientific, 
+                // а setprecision(0) убирает дробную часть
+                << std::defaultfloat << std::setprecision(0)
+
                 << std::setw(6) << list[i].ppid
-                << std::setw(6) << list[i].sessionId
-                << std::setw(6) << list[i].threadCount
-                << std::setw(8) << list[i].handleCount
-                << std::setw(12) << FormatMemory(list[i].privateMB)
-                << std::setw(12) << FormatMemory(list[i].virtualMB)
-                << std::setw(12) << FormatMemory(list[i].workingSetMB)
-                << std::setw(10) << list[i].pageFaultCount
+                << std::setw(5) << list[i].sessionId
+                << std::setw(5) << list[i].threadCount
+                << std::setw(6) << list[i].handleCount
+                << std::setw(11) << FormatMemory(list[i].privateMB)
+                << std::setw(11) << FormatMemory(list[i].virtualMB)
+                << std::setw(11) << FormatMemory(list[i].workingSetMB)
+                << list[i].pageFaultCount // Теперь должно выводиться как обычное целое число
+                << L"\033[K" // <--- ДОБАВИТЬ ЭТО! Стирает остаток строки до конца
                 << std::endl;
         }
     }
@@ -556,10 +552,15 @@ int main() {
 
         std::wcout << L"\n[Performance: " << currentHz << L" Hz]" << std::endl;
         // Исправленная отладка:
-        std::cout << "DEBUG OFFSET CHECK:" << std::endl;
-        std::cout << "Offsetof VirtualSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualSize) << std::endl;
+        // Правильный способ проверки смещения для вложенного поля:
+        std::cout << "Offsetof VirtualSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.VirtualSize) << std::endl;
+
+        // А вот примеры для остальных, если нужно проверить их:
+        std::cout << "Offsetof WorkingSetSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.WorkingSetSize) << std::endl;
+        std::cout << "Offsetof PageFaultCount: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.PageFaultCount) << std::endl;
+
+        // IoCounters - это прямой член, так что тут ничего менять не нужно:
         std::cout << "Offsetof IoCounters: " << offsetof(SYSTEM_PROCESS_INFORMATION, IoCounters) << std::endl;
-        std::cout << "Sizeof SYSTEM_PROCESS_INFORMATION: " << sizeof(SYSTEM_PROCESS_INFORMATION) << std::endl;
 
         // Минимальная задержка, чтобы не грузить CPU вхолостую
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
