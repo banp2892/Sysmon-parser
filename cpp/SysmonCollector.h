@@ -4,7 +4,7 @@
 #include <vector>
 #include <string>
 #include "json.hpp"
-#include <winternl.h>
+
 
 
 #pragma comment(lib, "wevtapi.lib")
@@ -40,6 +40,12 @@ struct StaticSysmonData {
     std::wstring ParentUser;         ///< [ParentUser] Имя пользователя родительского процесса
 };
 
+typedef enum _PROCESSINFOCLASS {
+    ProcessBasicInformation = 0,
+    ProcessTimes = 4,
+} PROCESSINFOCLASS;
+
+typedef long KPRIORITY;
 
 /**
  * @namespace SysmonCollector

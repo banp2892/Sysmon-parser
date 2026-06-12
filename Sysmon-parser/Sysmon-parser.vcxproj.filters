@@ -23,16 +23,16 @@
     <ClInclude Include="..\cpp\json.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\cpp\LogEnricher.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\cpp\Structures.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\cpp\SysmonCollector.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Metrics.h">
+    <ClInclude Include="..\cpp\Metrics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\cpp\MetricStructures.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

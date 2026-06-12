@@ -1,5 +1,7 @@
+#pragma once
 #define NOMINMAX
 #include <windows.h>
+#include "MetricStructures.h"
 #include <iostream>
 #include <vector>
 #include <unordered_map>
@@ -10,6 +12,7 @@
 #include <mutex>
 #include <functional>
 #include <algorithm> 
+
 
 #include <cstddef> // Для offsetof
 
@@ -42,76 +45,12 @@ std::wstring FormatMemory(SIZE_T bytes) {
 }
 
 
-typedef enum _SYSTEM_INFORMATION_CLASS {
-    SystemProcessInformation = 5
-} SYSTEM_INFORMATION_CLASS;
 
-typedef struct _UNICODE_STRING {
-    USHORT Length;
-    USHORT MaximumLength;
-    PWSTR Buffer;
-} UNICODE_STRING;
 
-typedef struct _CLIENT_ID {
-    HANDLE UniqueProcess;
-    HANDLE UniqueThread;
-} CLIENT_ID;
 
-typedef struct _SYSTEM_THREAD_INFORMATION {
-    LARGE_INTEGER KernelTime;
-    LARGE_INTEGER UserTime;
-    LARGE_INTEGER CreateTime;
-    ULONG WaitTime;
-    PVOID StartAddress;
-    CLIENT_ID ClientId;
-    LONG Priority;
-    LONG BasePriority;
-    ULONG ContextSwitches;
-    ULONG ThreadState;
-    ULONG ThreadWaitReason;
-} SYSTEM_THREAD_INFORMATION, * PSYSTEM_THREAD_INFORMATION;
 
-#pragma pack(push, 8)
 
-typedef struct _VM_COUNTERS_EX {
-    SIZE_T PeakVirtualSize;
-    SIZE_T VirtualSize;
-    ULONG  PageFaultCount;
-    SIZE_T PeakWorkingSetSize;
-    SIZE_T WorkingSetSize;
-    SIZE_T QuotaPeakPagedPoolUsage;
-    SIZE_T QuotaPagedPoolUsage;
-    SIZE_T QuotaPeakNonPagedPoolUsage;
-    SIZE_T QuotaNonPagedPoolUsage;
-    SIZE_T PagefileUsage;
-    SIZE_T PeakPagefileUsage;
-    SIZE_T PrivateUsage;
-} VM_COUNTERS_EX;
 
-typedef struct _SYSTEM_PROCESS_INFORMATION {
-    ULONG NextEntryOffset;
-    ULONG NumberOfThreads;
-    LARGE_INTEGER WorkingSetPrivateSize;
-    ULONG HardFaultCount;
-    ULONG NumberOfThreadsHighWatermark;
-    ULONGLONG CycleTime;
-    LARGE_INTEGER CreateTime;
-    LARGE_INTEGER UserTime;
-    LARGE_INTEGER KernelTime;
-    UNICODE_STRING ImageName;
-    LONG BasePriority;
-    ULONG Reserved1; // Выравнивание для UniqueProcessId
-    HANDLE UniqueProcessId;
-    HANDLE InheritedFromUniqueProcessId;
-    ULONG HandleCount;
-    ULONG SessionId;
-    ULONG_PTR UniqueProcessKey;
-    VM_COUNTERS_EX VirtualMemoryCounters;
-    SIZE_T PrivatePageCount;
-    IO_COUNTERS IoCounters;
-} SYSTEM_PROCESS_INFORMATION, * PSYSTEM_PROCESS_INFORMATION;
-
-#pragma pack(pop)
 
 
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
@@ -235,6 +174,15 @@ public:
         m_processDatabase.reserve(500); // Оптимизация аллокации
     }
 
+
+
+    ProcessRecord* GetRecord(DWORD pid, FILETIME createTime) {
+        LARGE_INTEGER li;
+        li.LowPart = createTime.dwLowDateTime;
+        li.HighPart = (LONG)createTime.dwHighDateTime;
+        return GetRecord(pid, li);
+    }
+
     void ExecuteQueryAndProcess() {
         if (!m_pfnNtQuerySystemInformation) return;
 
@@ -316,7 +264,7 @@ public:
             }
 
             PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>(
-                reinterpret_cast<BYTE*>(pData) + 0x100 
+                reinterpret_cast<BYTE*>(pData) + 0x100
                 );
 
             ULONG totalContextSwitches = 0;
@@ -409,7 +357,7 @@ public:
 
         // 2. Определяем, сколько кадров отмотать назад
         size_t availableSamples = record.isBufferFull ? size : record.historyIndex;
-        int actualLookback = std::min((int)availableSamples - 1, lookbackFrames);
+        int actualLookback = (std::min)((int)availableSamples - 1, lookbackFrames);
 
         if (actualLookback <= 0) return 0.0;
 
@@ -515,7 +463,7 @@ public:
 
         std::wcout << std::wstring(105, L'-') << std::endl;
 
-        size_t count = std::min(list.size(), (size_t)topCount);
+        size_t count = (std::min)(list.size(), (size_t)topCount);
         for (size_t i = 0; i < count; ++i) {
             std::wcout << std::left
                 << std::setw(7) << list[i].pid
@@ -536,54 +484,3 @@ public:
     }
 
 };
-
-int main() {
-    // 1. Настройка окружения
-    std::setlocale(LC_ALL, ""); // Для корректного вывода русских имен процессов
-    EnableAnsiSupport();        // Включаем поддержку ANSI для высокой скорости отрисовки
-
-    SystemPerformanceTelemetryMonitor monitor;
-
-    // Переменные для замера частоты (Hz)
-    auto lastTime = std::chrono::steady_clock::now();
-    int frameCounter = 0;
-    double currentHz = 0.0;
-
-    std::cout << "Monitoring system... Press Ctrl+C to exit." << std::endl;
-
-    while (true) {
-        monitor.ExecuteQueryAndProcess();
-
-        // ANSI-код "\033[H" перемещает курсор в верхний левый угол без очистки всего буфера
-        std::cout << "\033[H";
-
-       monitor.DisplayTopProcesses(15);
-
-        // --- Блок замера частоты (Hz) ---
-        frameCounter++;
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::duration<double> elapsed = now - lastTime;
-        if (elapsed.count() >= 1.0) {
-            currentHz = frameCounter / elapsed.count();
-            frameCounter = 0;
-            lastTime = now;
-        }
-
-        std::wcout << L"\n[Performance: " << currentHz << L" Hz]" << std::endl;
-        // Исправленная отладка:
-        // Правильный способ проверки смещения для вложенного поля:
-        std::cout << "Offsetof VirtualSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.VirtualSize) << std::endl;
-
-        // А вот примеры для остальных, если нужно проверить их:
-        std::cout << "Offsetof WorkingSetSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.WorkingSetSize) << std::endl;
-        std::cout << "Offsetof PageFaultCount: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualMemoryCounters.PageFaultCount) << std::endl;
-
-        // IoCounters - это прямой член, так что тут ничего менять не нужно:
-        std::cout << "Offsetof IoCounters: " << offsetof(SYSTEM_PROCESS_INFORMATION, IoCounters) << std::endl;
-
-        // Минимальная задержка, чтобы не грузить CPU вхолостую
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-
-    return 0;
-}

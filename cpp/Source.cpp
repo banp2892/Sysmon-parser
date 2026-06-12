@@ -9,10 +9,10 @@
 #include <windows.h>
 #include <winevt.h>
 #include "SysmonCollector.h"
-#include "LogEnricher.h"
+//#include "LogEnricher.h"
 #include <shlobj.h> ///< Для проверки запуска программы от имени администратора
-#include <iomanip>
-#include <sstream>
+#include "Metrics.h"
+
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -54,12 +54,19 @@ std::string FileTimeToReadable(const FILETIME& ft) {
 }
 
 
+struct SubscriptionContext {
+    SysmonCollector::SysmonProcessesMap* pSysmonMap;
+    SystemPerformanceTelemetryMonitor* pMonitor;
+};
 
 /**
 * @brief Функция, принимающая лог Sysmon и обрабатывающая его обогащение и сохранение
 */
 DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pContext, EVT_HANDLE hEvent) {
-    auto* mapPtr = static_cast<SysmonCollector::SysmonProcessesMap*>(pContext);
+    auto* pCtx = static_cast<SubscriptionContext*>(pContext);
+
+    auto* pMap = pCtx->pSysmonMap;
+    auto* pMonitor = pCtx->pMonitor;
     if (action != EvtSubscribeActionDeliver) return ERROR_SUCCESS;
 
     std::string xml = SysmonCollector::GetXmlFromEvent(hEvent);
@@ -70,27 +77,37 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
     StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
 
+    ProcessRecord* pRecord = nullptr;
+    bool hasValidTime = (StaticSysmon.createTime.dwLowDateTime != 0 ||
+        StaticSysmon.createTime.dwHighDateTime != 0);
+
+    if (hasValidTime) {
+        pRecord = pMonitor->GetRecord(StaticSysmon.ProcessId, StaticSysmon.createTime);
+    }
+    else {
+        pRecord = pMonitor->GetRecord(StaticSysmon.ProcessId);
+    }
 
     DWORD pid = StaticSysmon.ProcessId;
     int eventId = StaticSysmon.EventId;
     std::string Guid = StaticSysmon.ProcessGuid;
 
 
-    if (!mapPtr->Exists(Guid)) { ///< Если записи не существует
+    if (!pMap->Exists(Guid)) { ///< Если записи не существует
 
 
         SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
        
 
 
-        mapPtr->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
+        pMap->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
 
-        if (mapPtr->size() % 5 == 0) {
+        if (pMap->size() % 5 == 0) {
             // Оставляем флаг, чтобы в логе сразу видеть, если время "нулевое"
             bool isTimeInvalid = (StaticSysmon.createTime.dwLowDateTime == 0 &&
                 StaticSysmon.createTime.dwHighDateTime == 0);
 
-            std::cout << "[DEBUG] Size: " << mapPtr->size()
+            std::cout << "[DEBUG] Size: " << pMap->size()
                 << " | PID: " << pid
                 << " | Eventid: " << eventId
                 << " | UtcTime: " << (StaticSysmon.UtcTime.empty() ? "EMPTY" : StaticSysmon.UtcTime)
@@ -182,6 +199,9 @@ bool EnableDebugPrivilege() {
     return result;
 }
 
+
+
+
 int main() {
     setlocale(LC_ALL, "Russian");
 
@@ -198,9 +218,11 @@ int main() {
     }
 
     SysmonCollector::SysmonProcessesMap SysmonMap; ///< Создаем карту процессов, чтобы 
+    SystemPerformanceTelemetryMonitor monitor;
+    static SubscriptionContext subCtx = { &SysmonMap, &monitor };
 
     EVT_HANDLE hSub = EvtSubscribe(NULL, NULL, L"Microsoft-Windows-Sysmon/Operational", ///< Подписываемся на логи от Sysmon, если они приходят, то мы вызываем функцию SubscriptionCallback(), и передаем ей Map для дальнешего использования
-        L"*", NULL, &SysmonMap, SubscriptionCallback, EvtSubscribeToFutureEvents);
+        L"*", NULL, &subCtx, SubscriptionCallback, EvtSubscribeToFutureEvents);
 
     if (!hSub) {
         std::cerr << "[-] FAILED: Failed subscribe to Sysmon." << std::endl;
