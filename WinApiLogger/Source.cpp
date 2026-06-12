@@ -113,6 +113,35 @@ struct ProcessHistoricalSnapshot {
     std::chrono::steady_clock::time_point lastSampleTime;
 };
 
+struct ProcessSnapshot {
+    // Basic Info
+    DWORD pid;
+    DWORD ppid;
+
+    // Threads & Handles
+    DWORD numberOfThreads;
+    DWORD handleCount;
+
+    // Session
+    ULONG sessionId;
+
+    // Memory Counters
+    SIZE_T privatePageCount;
+    SIZE_T virtualSize;
+    SIZE_T workingSetSize;
+
+    // Page Faults
+    ULONG pageFaultCount;
+
+    // Pool Usage
+    SIZE_T pagedPoolUsage;
+    SIZE_T nonPagedPoolUsage;
+
+    // Computed (из буфера истории)
+    double lastCalculatedCpu;
+};
+
+
 struct ProcessKey {
     DWORD pid;
     LARGE_INTEGER createTime;
@@ -129,28 +158,55 @@ struct ProcessKeyHasher {
     }
 };
 
+struct ProcessTelemetry {
+    std::chrono::steady_clock::time_point time;
+
+    // CPU метрики (для расчета %)
+    ULONGLONG kernelTime;
+    ULONGLONG userTime;
+
+    // Снепшот состояния (для Enrichment)
+    DWORD ppid;
+    DWORD threadCount;
+    DWORD handleCount;
+    SIZE_T privatePageCount;
+    SIZE_T virtualSize;
+    SIZE_T workingSetSize;
+    ULONG pageFaultCount;
+    SIZE_T pagedPoolUsage;
+    SIZE_T nonPagedPoolUsage;
+    ULONG sessionId;
+};
+
+
 struct ProcessRecord {
     std::wstring processName;
-    SYSTEM_PROCESS_INFORMATION procInfo;
-    ProcessHistoricalSnapshot history;
+    // ProcInfo тут больше не нужен, мы берем данные из последнего элемента истории
     std::chrono::steady_clock::time_point lastUpdate;
     unsigned int visitCount = 0;
 
+    // Теперь буфер хранит полные снимки
+    std::vector<ProcessTelemetry> historyBuffer;
+    size_t historyIndex = 0;
+    bool isBufferFull = false;
 
-    struct Sample {
-        std::chrono::steady_clock::time_point time;
-        ULONGLONG kernelTime;
-        ULONGLONG userTime;
-    };
-
-    std::vector<Sample> historyBuffer; // Буфер на 2700 записей
-    size_t historyIndex = 0;           // Текущая позиция записи
-    bool isBufferFull = false;         // Заполнился ли буфер хотя бы раз
-
-    ProcessRecord() {
-        historyBuffer.resize(2700); // Резервируем память сразу при создании
+    ProcessRecord(size_t bufferSize = 600) {
+        historyBuffer.resize(bufferSize);
     }
 
+    // Метод для поиска "точки во времени"
+    ProcessTelemetry* FindSnapshotAtTime(std::chrono::steady_clock::time_point targetTime) {
+        size_t size = historyBuffer.size();
+        size_t scanIndex = historyIndex;
+        for (size_t i = 0; i < size; ++i) {
+            scanIndex = (scanIndex + size - 1) % size;
+            if (historyBuffer[scanIndex].time <= targetTime) {
+                return &historyBuffer[scanIndex];
+            }
+            if (!isBufferFull && scanIndex == 0) break;
+        }
+        return nullptr;
+    }
 };
 
 // --- Telemetry Monitor ---
@@ -213,6 +269,8 @@ public:
         }
     }
 
+
+
     void ParseBuffer() {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto currentTimePoint = std::chrono::steady_clock::now();
@@ -224,31 +282,46 @@ public:
 
             ProcessKey key{ pid, pData->CreateTime };
 
-            // 1. Если процесса нет — создаем (ProcessRecord инициализирует буфер в конструкторе)
+            // 1. Получаем запись
             auto& record = m_processDatabase[key];
-            if (record.processName.empty()) { // Простая проверка на новую запись
+
+            // Имя берем только при создании, чтобы не копировать строку постоянно
+            if (record.processName.empty()) {
                 if (pid == 0) record.processName = L"System Idle Process";
                 else if (pData->ImageName.Buffer)
                     record.processName = std::wstring(pData->ImageName.Buffer, pData->ImageName.Length / sizeof(wchar_t));
                 else record.processName = L"Unknown";
             }
 
-            // 2. Добавляем текущие данные в циклический буфер
-            // Теперь мы просто пишем в ячейку по индексу и двигаем его
-            auto& sample = record.historyBuffer[record.historyIndex];
-            sample.time = currentTimePoint;
-            sample.kernelTime = pData->KernelTime.QuadPart;
-            sample.userTime = pData->UserTime.QuadPart;
+            // 2. Добавляем данные в циклический буфер (Unfied approach)
+            auto& entry = record.historyBuffer[record.historyIndex];
 
+            // Время и CPU
+            entry.time = currentTimePoint;
+            entry.kernelTime = pData->KernelTime.QuadPart;
+            entry.userTime = pData->UserTime.QuadPart;
+
+            // Остальные поля для Enrichment (логи Sysmon)
+            entry.ppid = (DWORD)(uintptr_t)pData->InheritedFromProcessId;
+            entry.threadCount = pData->ThreadCount;
+            entry.handleCount = pData->HandleCount;
+            entry.privatePageCount = pData->PrivatePageCount;
+            entry.virtualSize = pData->VirtualMemoryCounters.VirtualSize;
+            entry.workingSetSize = pData->VirtualMemoryCounters.WorkingSetSize;
+            entry.pageFaultCount = pData->VirtualMemoryCounters.PageFaultCount;
+            entry.pagedPoolUsage = pData->VirtualMemoryCounters.QuotaPagedPoolUsage;
+            entry.nonPagedPoolUsage = pData->VirtualMemoryCounters.QuotaNonPagedPoolUsage;
+            entry.sessionId = pData->SessionId;
+
+            // Обновляем индексы
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
 
-            // 3. Обновляем текущие данные
-            record.procInfo = *pData;
+            // 3. Обновляем метаданные
             record.lastUpdate = currentTimePoint;
             record.visitCount++;
 
-            // Обновляем индекс актуальности
+            // Обновляем индекс актуальности PID
             m_activePidMap[pid] = pData->CreateTime;
 
             if (pData->NextEntryOffset == 0) break;
@@ -289,6 +362,43 @@ public:
         return false;
     }
 
+    double CalculateCpuUsage(const ProcessRecord& record, int lookbackFrames) const {
+        if (record.historyBuffer.empty()) return 0.0;
+
+        size_t size = record.historyBuffer.size();
+
+        // Индекс самого последнего (свежего) кадра
+        size_t latestIdx = (record.historyIndex + size - 1) % size;
+        const auto& latestSample = record.historyBuffer[latestIdx];
+
+        // Определяем, сколько реально кадров мы можем "отмотать" назад
+        // Нельзя отмотать больше, чем есть записей
+        size_t availableSamples = record.isBufferFull ? size : record.historyIndex;
+        int actualLookback = std::min((int)availableSamples - 1, lookbackFrames);
+
+        if (actualLookback <= 0) return 0.0;
+
+        // Индекс кадра в прошлом
+        size_t oldIdx = (latestIdx + size - actualLookback) % size;
+        const auto& oldSample = record.historyBuffer[oldIdx];
+
+        // Расчет времени
+        auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(latestSample.time - oldSample.time).count();
+        double duration100ns = static_cast<double>(durationNs) / 100.0;
+
+        if (duration100ns <= 0) return 0.0;
+
+        // Расчет CPU
+        ULONGLONG deltaK = latestSample.kernelTime - oldSample.kernelTime;
+        ULONGLONG deltaU = latestSample.userTime - oldSample.userTime;
+
+        // Защита от отрицательных дельт (если процесс перезапустился или данные "битые")
+        if ((long long)deltaK < 0 || (long long)deltaU < 0) return 0.0;
+
+        double rawUsage = ((static_cast<double>(deltaK) + static_cast<double>(deltaU)) / duration100ns) * 100.0;
+        return rawUsage / static_cast<double>(m_sysInfo.dwNumberOfProcessors);
+    }
+
 
     void DisplayTopProcesses(int topCount) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -298,15 +408,16 @@ public:
             std::wstring name;
             double cpuUsage;
             unsigned int visitCount;
+            // Новые поля для отображения
+            SIZE_T workingSetMB;
+            ULONG threads;
+            ULONG handles;
         };
 
         std::vector<ProcessDisplay> list;
-        auto now = std::chrono::steady_clock::now();
-
         unsigned long long totalGlobalRecords = 0;
         size_t totalMemoryUsage = 0;
 
-        // Используем классический цикл, чтобы избежать ошибок с C++17
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ++it) {
             const auto& key = it->first;
             const auto& record = it->second;
@@ -314,53 +425,55 @@ public:
             totalGlobalRecords += record.visitCount;
             totalMemoryUsage += sizeof(key) + sizeof(record) +
                 (record.processName.capacity() * sizeof(wchar_t)) +
-                (record.historyBuffer.capacity() * sizeof(ProcessRecord::Sample));
+                (record.historyBuffer.capacity() * sizeof(ProcessTelemetry));
 
-            double cpu = 0.0;
+            // 1. Расчет CPU (как и просил)
+            double cpu = CalculateCpuUsage(record, 10);
 
-            // Расчет CPU через кольцевой буфер
-            size_t oldestIndex = record.isBufferFull ? record.historyIndex : 0;
-            const auto& oldSample = record.historyBuffer[oldestIndex];
+            // 2. Получаем последние метрики из буфера
+            size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
+            const auto& latest = record.historyBuffer[latestIdx];
 
-            // Используем duration_cast правильно
-            auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(now - oldSample.time).count();
-            double duration100ns = static_cast<double>(duration) / 100.0;
-
-            if (duration100ns > 0) {
-                ULONGLONG deltaK = record.procInfo.KernelTime.QuadPart - oldSample.kernelTime;
-                ULONGLONG deltaU = record.procInfo.UserTime.QuadPart - oldSample.userTime;
-                double rawUsage = ((static_cast<double>(deltaK) + static_cast<double>(deltaU)) / duration100ns) * 100.0;
-                cpu = rawUsage / static_cast<double>(m_sysInfo.dwNumberOfProcessors);
-            }
-
-            // Явно приводим типы в конструктор, чтобы не было "narrowing conversion"
-            list.push_back({ (DWORD)key.pid, record.processName, cpu, (unsigned int)record.visitCount });
+            // 3. Сохраняем в список для вывода
+            list.push_back({
+                (DWORD)key.pid,
+                record.processName,
+                cpu,
+                (unsigned int)record.visitCount,
+                latest.workingSetSize / 1024 / 1024, // RAM в MB
+                latest.threadCount,
+                latest.handleCount
+                });
         }
 
-        // 2. Сортируем
+        // Сортировка
         std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
             return a.cpuUsage > b.cpuUsage;
             });
 
-        // 3. Вывод
+        // --- Вывод ---
         std::wcout << L"\n--- ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
         std::wcout << L"Всего уникальных: " << m_processDatabase.size()
-            << L" | Всего записей: " << totalGlobalRecords
             << L" | Память БД: ~" << (totalMemoryUsage / 1024) << L" KB" << std::endl;
 
+        // Расширенные заголовки
         std::wcout << std::left << std::setw(8) << L"PID"
-            << std::setw(25) << L"Name"
-            << std::setw(10) << L"CPU%"
-            << std::setw(10) << L"Records" << std::endl;
+            << std::setw(20) << L"Name"
+            << std::setw(8) << L"CPU%"
+            << std::setw(8) << L"RAM(MB)"
+            << std::setw(8) << L"Threads"
+            << std::setw(8) << L"Handles" << std::endl;
 
-        std::wcout << std::wstring(55, L'-') << std::endl;
+        std::wcout << std::wstring(60, L'-') << std::endl;
 
         size_t count = std::min(list.size(), (size_t)topCount);
         for (size_t i = 0; i < count; ++i) {
             std::wcout << std::left << std::setw(8) << list[i].pid
-                << std::setw(25) << list[i].name.substr(0, 24)
-                << std::setw(10) << std::fixed << std::setprecision(2) << list[i].cpuUsage
-                << std::setw(10) << list[i].visitCount << std::endl;
+                << std::setw(20) << list[i].name.substr(0, 19)
+                << std::setw(8) << std::fixed << std::setprecision(1) << list[i].cpuUsage
+                << std::setw(8) << list[i].workingSetMB
+                << std::setw(8) << list[i].threads
+                << std::setw(8) << list[i].handles << std::endl;
         }
     }
 
@@ -401,7 +514,7 @@ int main() {
         std::wcout << L"\n[Performance: " << currentHz << L" Hz]" << std::endl;
 
         // Минимальная задержка, чтобы не грузить CPU вхолостую
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     return 0;
