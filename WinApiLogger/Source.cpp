@@ -10,8 +10,12 @@
 #include <mutex>
 #include <functional>
 #include <algorithm> 
-#include <iomanip>   
-#include <vector>
+
+#include <cstddef> // Для offsetof
+
+
+#include <sstream>
+//#include <winternl.h>
 
 // --- Native API Definitions ---
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000)
@@ -25,6 +29,16 @@ void EnableAnsiSupport() {
     GetConsoleMode(hOut, &dwMode);
     dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     SetConsoleMode(hOut, dwMode);
+}
+
+std::wstring FormatMemory(SIZE_T bytes) {
+    SIZE_T mb = bytes / 1024 / 1024;
+    if (mb > 1024) {
+        std::wstringstream ss;
+        ss << std::fixed << std::setprecision(1) << (double)mb / 1024.0 << L" GB";
+        return ss.str();
+    }
+    return std::to_wstring(mb) + L" MB";
 }
 
 
@@ -57,10 +71,13 @@ typedef struct _SYSTEM_THREAD_INFORMATION {
     ULONG ThreadWaitReason;
 } SYSTEM_THREAD_INFORMATION, * PSYSTEM_THREAD_INFORMATION;
 
+#pragma pack(push, 8)
+
+// 1. Сначала VM_COUNTERS_EX
 typedef struct _VM_COUNTERS_EX {
     SIZE_T PeakVirtualSize;
     SIZE_T VirtualSize;
-    ULONG PageFaultCount;
+    ULONG  PageFaultCount;
     SIZE_T PeakWorkingSetSize;
     SIZE_T WorkingSetSize;
     SIZE_T QuotaPeakPagedPoolUsage;
@@ -72,28 +89,51 @@ typedef struct _VM_COUNTERS_EX {
     SIZE_T PrivateUsage;
 } VM_COUNTERS_EX;
 
+#pragma pack(push, 8)
 typedef struct _SYSTEM_PROCESS_INFORMATION {
-    ULONG NextEntryOffset;
-    ULONG ThreadCount;
-    LARGE_INTEGER WorkingSetPrivateSize;
-    ULONG HardFaultCount;
-    ULONG NumberOfThreadsHighWatermark;
-    ULONGLONG CycleTime;
-    LARGE_INTEGER CreateTime;
-    LARGE_INTEGER UserTime;
-    LARGE_INTEGER KernelTime;
-    UNICODE_STRING ImageName;
-    LONG BasePriority;
-    HANDLE UniqueProcessId;
-    HANDLE InheritedFromProcessId;
-    ULONG HandleCount;
-    ULONG SessionId;
-    ULONG_PTR UniqueProcessKey;
-    VM_COUNTERS_EX VirtualMemoryCounters;
-    SIZE_T PrivatePageCount;
-    IO_COUNTERS IoCounters;
-    SYSTEM_THREAD_INFORMATION ThreadInfos;
+    ULONG NextEntryOffset;          // 0
+    ULONG NumberOfThreads;          // 4
+    LARGE_INTEGER WorkingSetPrivateSize; // 8
+    ULONG HardFaultCount;           // 16
+    ULONG NumberOfThreadsHighWatermark; // 20
+    ULONGLONG CycleTime;            // 24
+    LARGE_INTEGER CreateTime;       // 32
+    LARGE_INTEGER UserTime;         // 40
+    LARGE_INTEGER KernelTime;       // 48
+    UNICODE_STRING ImageName;       // 56
+    LONG BasePriority;              // 72
+    ULONG Reserved1;                // 76
+    HANDLE UniqueProcessId;         // 80
+    HANDLE InheritedFromUniqueProcessId; // 88
+    ULONG HandleCount;              // 96
+    ULONG SessionId;                // 100
+    ULONG_PTR UniqueProcessKey;     // 104
+    SIZE_T PeakVirtualSize;         // 112
+    SIZE_T VirtualSize;             // 120  <-- МЫ ИЩЕМ 120!
+    ULONG PageFaultCount;           // 128
+    ULONG Reserved2;                // 132
+    SIZE_T PeakWorkingSetSize;      // 136
+    SIZE_T WorkingSetSize;          // 144
+    SIZE_T QuotaPeakPagedPoolUsage; // 152
+    SIZE_T QuotaPagedPoolUsage;     // 160
+    SIZE_T QuotaPeakNonPagedPoolUsage; // 168
+    SIZE_T QuotaNonPagedPoolUsage;  // 176
+    SIZE_T PagefileUsage;           // 184
+    SIZE_T PeakPagefileUsage;       // 192
+    SIZE_T PrivatePageCount;        // 200
+    IO_COUNTERS IoCounters;         // 208  <-- МЫ ИЩЕМ 208!
+    // Остаток до 336 байт (336 - 256 = 80 байт)
+    unsigned char ReservedPadding[80];
 } SYSTEM_PROCESS_INFORMATION, * PSYSTEM_PROCESS_INFORMATION;
+#pragma pack(pop)
+
+// КРИТИЧЕСКИ ВАЖНАЯ ПРОВЕРКА:
+static_assert(offsetof(SYSTEM_PROCESS_INFORMATION, VirtualSize) == 120, "VirtualSize смещение неверно!");
+static_assert(offsetof(SYSTEM_PROCESS_INFORMATION, IoCounters) == 208, "IoCounters смещение неверно!");
+static_assert(sizeof(SYSTEM_PROCESS_INFORMATION) == 336, "Размер не 336!");
+
+// ОБЯЗАТЕЛЬНО добавьте это в основной код
+static_assert(sizeof(SYSTEM_PROCESS_INFORMATION) == 336, "Ошибка: Размер структуры не 336 байт!");
 
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
@@ -281,11 +321,8 @@ public:
             DWORD pid = static_cast<DWORD>(reinterpret_cast<uintptr_t>(pData->UniqueProcessId));
 
             ProcessKey key{ pid, pData->CreateTime };
-
-            // 1. Получаем запись
             auto& record = m_processDatabase[key];
 
-            // Имя берем только при создании, чтобы не копировать строку постоянно
             if (record.processName.empty()) {
                 if (pid == 0) record.processName = L"System Idle Process";
                 else if (pData->ImageName.Buffer)
@@ -293,35 +330,31 @@ public:
                 else record.processName = L"Unknown";
             }
 
-            // 2. Добавляем данные в циклический буфер (Unfied approach)
             auto& entry = record.historyBuffer[record.historyIndex];
 
-            // Время и CPU
             entry.time = currentTimePoint;
             entry.kernelTime = pData->KernelTime.QuadPart;
             entry.userTime = pData->UserTime.QuadPart;
 
-            // Остальные поля для Enrichment (логи Sysmon)
-            entry.ppid = (DWORD)(uintptr_t)pData->InheritedFromProcessId;
-            entry.threadCount = pData->ThreadCount;
+            entry.ppid = (DWORD)(uintptr_t)pData->InheritedFromUniqueProcessId;
+            entry.threadCount = pData->NumberOfThreads;
             entry.handleCount = pData->HandleCount;
+
+            // ПРЯМОЕ ОБРАЩЕНИЕ (без VirtualMemoryCounters)
             entry.privatePageCount = pData->PrivatePageCount;
-            entry.virtualSize = pData->VirtualMemoryCounters.VirtualSize;
-            entry.workingSetSize = pData->VirtualMemoryCounters.WorkingSetSize;
-            entry.pageFaultCount = pData->VirtualMemoryCounters.PageFaultCount;
-            entry.pagedPoolUsage = pData->VirtualMemoryCounters.QuotaPagedPoolUsage;
-            entry.nonPagedPoolUsage = pData->VirtualMemoryCounters.QuotaNonPagedPoolUsage;
+            entry.virtualSize = pData->VirtualSize;
+            entry.workingSetSize = pData->WorkingSetSize;
+            entry.pageFaultCount = pData->PageFaultCount;
+            entry.pagedPoolUsage = pData->QuotaPagedPoolUsage;
+            entry.nonPagedPoolUsage = pData->QuotaNonPagedPoolUsage;
             entry.sessionId = pData->SessionId;
 
-            // Обновляем индексы
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
 
-            // 3. Обновляем метаданные
             record.lastUpdate = currentTimePoint;
             record.visitCount++;
 
-            // Обновляем индекс актуальности PID
             m_activePidMap[pid] = pData->CreateTime;
 
             if (pData->NextEntryOffset == 0) break;
@@ -407,14 +440,12 @@ public:
             DWORD pid;
             std::wstring name;
             double cpuUsage;
-            unsigned int visitCount;
-            // Все поля из ProcessTelemetry
             DWORD ppid;
             DWORD threadCount;
             DWORD handleCount;
-            SIZE_T privateMB;
-            SIZE_T virtualMB;
-            SIZE_T workingSetMB;
+            SIZE_T privateMB;    // Храним в байтах
+            SIZE_T virtualMB;    // Храним в байтах
+            SIZE_T workingSetMB; // Храним в байтах
             ULONG pageFaultCount;
             SIZE_T pagedPoolMB;
             SIZE_T nonPagedPoolMB;
@@ -435,16 +466,15 @@ public:
                 (DWORD)key.pid,
                 record.processName,
                 cpu,
-                (unsigned int)record.visitCount,
                 latest.ppid,
                 latest.threadCount,
                 latest.handleCount,
-                latest.privatePageCount / 1024 / 1024,
-                latest.virtualSize / 1024 / 1024,
-                latest.workingSetSize / 1024 / 1024,
+                latest.privatePageCount,
+                latest.virtualSize,
+                latest.workingSetSize,
                 latest.pageFaultCount,
-                latest.pagedPoolUsage / 1024 / 1024,
-                latest.nonPagedPoolUsage / 1024 / 1024,
+                latest.pagedPoolUsage,
+                latest.nonPagedPoolUsage,
                 latest.sessionId
                 });
         }
@@ -453,44 +483,40 @@ public:
             return a.cpuUsage > b.cpuUsage;
             });
 
-        // Вывод
         std::wcout << L"\n--- ПОЛНАЯ ТЕЛЕМЕТРИЯ ТОП-" << topCount << L" ПРОЦЕССОВ ---\n";
 
-        // Заголовки (используем компактные названия для колонок)
-        // PID | Name | CPU% | PPID | Sess | Thr | Hnd | Priv | Virt | WS | Faults | Paged | NonPg
+        // Увеличенная ширина колонок для читаемости
         std::wcout << std::left
-            << std::setw(7) << L"PID"
-            << std::setw(15) << L"Name"
-            << std::setw(6) << L"CPU%"
+            << std::setw(8) << L"PID"
+            << std::setw(20) << L"Name"
+            << std::setw(8) << L"CPU%"
             << std::setw(6) << L"PPID"
-            << std::setw(5) << L"Sess"
-            << std::setw(5) << L"Thr"
-            << std::setw(6) << L"Hnd"
-            << std::setw(6) << L"Priv"
-            << std::setw(6) << L"Virt"
-            << std::setw(6) << L"WS"
-            << std::setw(8) << L"Faults"
-            << std::setw(6) << L"Paged"
-            << std::setw(6) << L"NonPg" << std::endl;
+            << std::setw(6) << L"Sess"
+            << std::setw(6) << L"Thr"
+            << std::setw(8) << L"Hnd"
+            << std::setw(12) << L"Priv"
+            << std::setw(12) << L"Virt"
+            << std::setw(12) << L"WS"
+            << std::setw(10) << L"Faults"
+            << std::endl;
 
-        std::wcout << std::wstring(90, L'-') << std::endl;
+        std::wcout << std::wstring(110, L'-') << std::endl;
 
         size_t count = std::min(list.size(), (size_t)topCount);
         for (size_t i = 0; i < count; ++i) {
             std::wcout << std::left
-                << std::setw(7) << list[i].pid
-                << std::setw(15) << list[i].name.substr(0, 14)
-                << std::setw(6) << std::fixed << std::setprecision(1) << list[i].cpuUsage
+                << std::setw(8) << list[i].pid
+                << std::setw(20) << list[i].name.substr(0, 19)
+                << std::setw(8) << std::fixed << std::setprecision(1) << list[i].cpuUsage
                 << std::setw(6) << list[i].ppid
-                << std::setw(5) << list[i].sessionId
-                << std::setw(5) << list[i].threadCount
-                << std::setw(6) << list[i].handleCount
-                << std::setw(6) << list[i].privateMB
-                << std::setw(6) << list[i].virtualMB
-                << std::setw(6) << list[i].workingSetMB
-                << std::setw(8) << list[i].pageFaultCount
-                << std::setw(6) << list[i].pagedPoolMB
-                << std::setw(6) << list[i].nonPagedPoolMB << std::endl;
+                << std::setw(6) << list[i].sessionId
+                << std::setw(6) << list[i].threadCount
+                << std::setw(8) << list[i].handleCount
+                << std::setw(12) << FormatMemory(list[i].privateMB)
+                << std::setw(12) << FormatMemory(list[i].virtualMB)
+                << std::setw(12) << FormatMemory(list[i].workingSetMB)
+                << std::setw(10) << list[i].pageFaultCount
+                << std::endl;
         }
     }
 
@@ -529,6 +555,11 @@ int main() {
         }
 
         std::wcout << L"\n[Performance: " << currentHz << L" Hz]" << std::endl;
+        // Исправленная отладка:
+        std::cout << "DEBUG OFFSET CHECK:" << std::endl;
+        std::cout << "Offsetof VirtualSize: " << offsetof(SYSTEM_PROCESS_INFORMATION, VirtualSize) << std::endl;
+        std::cout << "Offsetof IoCounters: " << offsetof(SYSTEM_PROCESS_INFORMATION, IoCounters) << std::endl;
+        std::cout << "Sizeof SYSTEM_PROCESS_INFORMATION: " << sizeof(SYSTEM_PROCESS_INFORMATION) << std::endl;
 
         // Минимальная задержка, чтобы не грузить CPU вхолостую
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
