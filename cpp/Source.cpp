@@ -81,7 +81,7 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
     bool hasValidTime = (StaticSysmon.createTime.dwLowDateTime != 0 ||
         StaticSysmon.createTime.dwHighDateTime != 0);
 
-    if (hasValidTime) {
+    if (hasValidTime) {///< @todo, тут проверить, почему не заходит внутрь, даже если у нас спарсилось время?? + почему то по pid не может найти
         pRecord = pMonitor->GetRecord(StaticSysmon.ProcessId, StaticSysmon.createTime);
     }
     else {
