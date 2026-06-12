@@ -170,6 +170,7 @@ struct ProcessTelemetry {
     SIZE_T nonPagedPoolUsage;
     ULONG sessionId;
     ULONG contextSwitches;
+    double cpuUsage;
 };
 
 
@@ -316,6 +317,8 @@ public:
             // Записываем собранную метрику
             entry.contextSwitches = totalContextSwitches;
 
+            entry.cpuUsage = CalculateCpuUsage(record, 10);
+
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
 
@@ -368,32 +371,32 @@ public:
 
         size_t size = record.historyBuffer.size();
 
-        // Индекс самого последнего (свежего) кадра
+        // 1. Индекс текущего (самого свежего) кадра
+        // Если мы внутри ParseBuffer, то historyIndex указывает на СЛЕДУЮЩИЙ слот, 
+        // поэтому берем (index - 1)
         size_t latestIdx = (record.historyIndex + size - 1) % size;
         const auto& latestSample = record.historyBuffer[latestIdx];
 
-        // Определяем, сколько реально кадров мы можем "отмотать" назад
-        // Нельзя отмотать больше, чем есть записей
+        // 2. Определяем, сколько кадров отмотать назад
         size_t availableSamples = record.isBufferFull ? size : record.historyIndex;
         int actualLookback = std::min((int)availableSamples - 1, lookbackFrames);
 
         if (actualLookback <= 0) return 0.0;
 
-        // Индекс кадра в прошлом
+        // 3. Индекс кадра в прошлом
         size_t oldIdx = (latestIdx + size - actualLookback) % size;
         const auto& oldSample = record.historyBuffer[oldIdx];
 
-        // Расчет времени
+        // 4. Расчет времени
         auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(latestSample.time - oldSample.time).count();
         double duration100ns = static_cast<double>(durationNs) / 100.0;
 
         if (duration100ns <= 0) return 0.0;
 
-        // Расчет CPU
+        // 5. Расчет CPU
         ULONGLONG deltaK = latestSample.kernelTime - oldSample.kernelTime;
         ULONGLONG deltaU = latestSample.userTime - oldSample.userTime;
 
-        // Защита от отрицательных дельт (если процесс перезапустился или данные "битые")
         if ((long long)deltaK < 0 || (long long)deltaU < 0) return 0.0;
 
         double rawUsage = ((static_cast<double>(deltaK) + static_cast<double>(deltaU)) / duration100ns) * 100.0;
@@ -428,13 +431,14 @@ public:
             const auto& key = it->first;
             const auto& record = it->second;
 
+            // Берем самый свежий снимок
             size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
             const auto& latest = record.historyBuffer[latestIdx];
 
             list.push_back({
                 (DWORD)key.pid,
                 record.processName,
-                CalculateCpuUsage(record, 10),
+                latest.cpuUsage, // <--- БЕРЕМ ГОТОВОЕ ЗНАЧЕНИЕ ИЗ ПАМЯТИ
                 latest.ppid,
                 latest.sessionId,
                 latest.threadCount,
@@ -451,22 +455,21 @@ public:
             totalHistorySnapshots += record.historyBuffer.size();
         }
 
+        // Сортировка по CPU теперь работает моментально
         std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
             return a.cpuUsage > b.cpuUsage;
             });
 
-        // --- СТАТИСТИКА БАЗЫ (ВЕРНУЛ) ---
+        // ... (остальной код вывода остается без изменений) ...
         std::wcout << L"\n========================================================" << std::endl;
         std::wcout << L"DATABASE STATS:" << std::endl;
         std::wcout << L"Total Processes tracked: " << m_processDatabase.size() << std::endl;
         std::wcout << L"Total history snapshots: " << totalHistorySnapshots << std::endl;
-        // Используем размер вашей новой структуры ProcessTelemetry
         std::wcout << L"Approx. memory footprint: " << FormatMemory(totalHistorySnapshots * sizeof(ProcessTelemetry)) << std::endl;
         std::wcout << L"========================================================\n" << std::endl;
 
         std::wcout << L"--- ТОП-" << topCount << L" ПРОЦЕССОВ (Расширенная телеметрия) ---\n";
 
-        // Заголовок
         std::wcout << std::left
             << std::setw(7) << L"PID"
             << std::setw(16) << L"Name"
