@@ -70,7 +70,7 @@ struct ProcessHistoricalSnapshot {
     ULONGLONG lastReadBytes = 0;
     ULONGLONG lastWriteBytes = 0;
     ULONGLONG lastOtherBytes = 0;
-    std::chrono::steady_clock::time_point lastSampleTime;
+    std::chrono::system_clock::time_point lastSampleTime;
 };
 
 
@@ -93,7 +93,7 @@ struct ProcessKeyHasher {
 };
 
 struct ProcessTelemetry {
-    std::chrono::steady_clock::time_point time;
+    std::chrono::system_clock::time_point time;
 
     // CPU метрики (для расчета %)
     ULONGLONG kernelTime;
@@ -118,7 +118,7 @@ struct ProcessTelemetry {
 struct ProcessRecord {
     std::wstring processName;
     // ProcInfo тут больше не нужен, мы берем данные из последнего элемента истории
-    std::chrono::steady_clock::time_point lastUpdate;
+    std::chrono::system_clock::time_point lastUpdate;
     unsigned int visitCount = 0;
 
     // Теперь буфер хранит полные снимки
@@ -131,7 +131,7 @@ struct ProcessRecord {
     }
 
     // Метод для поиска "точки во времени"
-    ProcessTelemetry* FindSnapshotAtTime(std::chrono::steady_clock::time_point targetTime) {
+    ProcessTelemetry* FindSnapshotAtTime(std::chrono::system_clock::time_point targetTime) {
         size_t size = historyBuffer.size();
         size_t scanIndex = historyIndex;
         for (size_t i = 0; i < size; ++i) {
@@ -231,11 +231,16 @@ public:
         return nullptr; // Не найдено
     }
 
+
+    /*
+    * @brief возвращает запись о самом новом по времени создания процесс по его pid
+    * @todo возможно, надо добавить проверку, передавая время прихода лога, чтобы он не выдавал самый новый процесс, когда не надо
+    */
     ProcessRecord* GetRecord(DWORD pid) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
 
         // 1. Ищем актуальный CreateTime для этого PID
-        auto activeIt = m_activePidMap.find(pid);
+        auto activeIt = m_activePidMap.find(pid); 
         if (activeIt == m_activePidMap.end()) {
             return nullptr; // Процесс не найден или неактивен
         }
@@ -253,7 +258,7 @@ public:
 
     void ParseBuffer() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto currentTimePoint = std::chrono::steady_clock::now();
+        auto currentTimePoint = std::chrono::system_clock::now();
         BYTE* pCurrentPosition = m_telemetryBuffer.data();
 
         while (pCurrentPosition) {
@@ -320,7 +325,7 @@ public:
     // Удаление "мертвых" процессов (которые не обновлялись 5 секунд)
     void PruneDatabase() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto now = std::chrono::steady_clock::now();
+        auto now = std::chrono::system_clock::now();
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
             if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
                 // Если запись в базе - это тот же процесс, что и активный в индексе, удаляем из индекса

@@ -1,4 +1,5 @@
-﻿#include <iostream>
+﻿#define NOMINMAX
+#include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -30,6 +31,48 @@ uint64_t numbers_of_logs=0;
 std::unordered_map<DWORD, ProcessState> g_ProcessCache;
 std::mutex g_CacheMutex;
 
+
+/**
+* @brief преобразует время utcTime, которое мы получаем из лога Sysmon во время std::chrono::system_clock::time_point
+*/
+std::chrono::system_clock::time_point ParseSysmonUtcTime(const std::string& utcTime) {
+    // Формат: "YYYY-MM-DD HH:MM:SS.mmm"
+    // Пример: "2026-06-19 12:09:10.123"
+
+    SYSTEMTIME st = { 0 };
+    int milliseconds = 0;
+
+    // Быстрый парсинг (sscanf)
+    if (sscanf_s(utcTime.c_str(), "%hu-%hu-%hu %hu:%hu:%hu.%d",
+        &st.wYear, &st.wMonth, &st.wDay,
+        &st.wHour, &st.wMinute, &st.wSecond, &milliseconds) != 7) {
+        return std::chrono::system_clock::time_point::min();
+    }
+    st.wMilliseconds = (WORD)milliseconds;
+
+    // Преобразуем в FILETIME
+    FILETIME ft;
+    SystemTimeToFileTime(&st, &ft);
+
+    // Преобразуем FILETIME в system_clock::time_point
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+
+    // FILETIME — это количество 100-нс интервалов с 1601 года
+    // system_clock — это количество 100-нс интервалов с 1970 года
+    // Разница между 1601 и 1970 годами в 100-нс интервалах
+    const long long WINDOWS_TICK = 10000000;
+    const long long SEC_TO_UNIX_EPOCH = 11644473600LL;
+
+    long long unixTime = (uli.QuadPart / WINDOWS_TICK) - SEC_TO_UNIX_EPOCH;
+
+    return std::chrono::system_clock::time_point(std::chrono::seconds(unixTime) +
+        std::chrono::milliseconds(st.wMilliseconds));
+}
+
+
+
 /**
  * @brief Генерирует имя файла внутри папки data/
  */
@@ -42,6 +85,9 @@ std::string GetFilePath() {
     return oss.str();
 }
 
+/**
+* Из FILETIME преобразует время в читаемое
+*/
 
 std::string FileTimeToReadable(const FILETIME& ft) {
     SYSTEMTIME st;
@@ -79,18 +125,18 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
         return ERROR_SUCCESS;
     }
 
-    StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml);
+    StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml); ///< Парсим Sysmon структуру
 
 
-    LARGE_INTEGER liTime;
-    liTime.LowPart = StaticSysmon.createTime.dwLowDateTime;
-    liTime.HighPart = (LONG)StaticSysmon.createTime.dwHighDateTime;
+    
 
     DWORD pid = StaticSysmon.ProcessId;
     int eventId = StaticSysmon.EventId;
     std::string Guid = StaticSysmon.ProcessGuid;
 
-    auto recordOpt = pMonitor->GetRecord(pid, liTime);
+    
+    
+    
 
 
     if (!pMap->Exists(Guid)) { ///< Если записи не существует
@@ -98,9 +144,10 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
         SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
        
-
-
         pMap->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
+
+
+
 
         if (pMap->size() % 5 == 0) {
             // Оставляем флаг, чтобы в логе сразу видеть, если время "нулевое"
@@ -119,6 +166,25 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
 
 
     }
+    else {
+
+    }
+
+    auto* pRecord = pMonitor->GetRecord(pid);
+    if (pRecord) {
+        // Конвертируем время события из Sysmon в понятный формат для сравнения
+        auto logTime = ParseSysmonUtcTime(StaticSysmon.UtcTime);
+
+        // Находим ближайший срез метрик
+        auto* snapshot = pRecord->FindSnapshotAtTime(logTime);
+        if (snapshot) {
+            // Копируем данные метрик в нашу структуру
+            StaticSysmon.telemetrySnapshot = *snapshot;
+            StaticSysmon.hasTelemetry = true;
+        }
+    }
+
+
     ///< @todo написать логику, если данные уже есть, возможно надо вызвать еще раз EnrichProcessData, и так же вызвать обогощение метриками
 
 
@@ -202,12 +268,17 @@ bool EnableDebugPrivilege() {
 
 void MetricsCollectionWorker(SystemPerformanceTelemetryMonitor& monitor, std::atomic<bool>& running) {
     std::cout << "[MetricsWorker] Thread started." << std::endl;
-
+    int counter = 0;
     while (running) {
         monitor.ExecuteQueryAndProcess();
+
+        // Добавим лог раз в 50 итераций (раз в секунду), чтобы не спамить
+        if (++counter % 50 == 0) {
+            std::cout << "[MetricsWorker] Working... Alive." << std::endl;
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-
     std::cout << "[MetricsWorker] Thread stopped." << std::endl;
 }
 

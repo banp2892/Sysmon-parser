@@ -10,7 +10,7 @@
 #pragma comment(lib, "wevtapi.lib")
 
 
-/**
+    /**
     * @struct StaticSysmonData
     * @brief Структура для хранения разобранных данных события Sysmon.
     */
@@ -38,6 +38,10 @@ struct StaticSysmonData {
     std::wstring ParentImage;        ///< [ParentImage] Путь к исполняемому файлу родителя
     std::wstring ParentCommandLine;  ///< [ParentCommandLine] Командная строка родителя
     std::wstring ParentUser;         ///< [ParentUser] Имя пользователя родительского процесса
+
+    ///< указатель на структуру, которую получаем из метрик @todo
+    bool hasTelemetry = false;
+    ProcessTelemetry telemetrySnapshot;
 };
 
 typedef enum _PROCESSINFOCLASS {
@@ -292,9 +296,6 @@ namespace SysmonCollector {
     }
 
 
-    
-
-
     /**
      * @brief Парсит XML-строку события Sysmon и заполняет структуру StaticSysmonData.
      * * @param xml Строка, содержащая XML-разметку события Sysmon.
@@ -302,9 +303,6 @@ namespace SysmonCollector {
      */
     StaticSysmonData ParseSysmonEvent(const std::string& xml) {
         StaticSysmonData data = {};
-
-        
-
 
         /**
          * @brief Внутренняя лямбда для поиска значений.
@@ -407,11 +405,6 @@ namespace SysmonCollector {
 
         return data;
     }
-
-
-
-
-
 
 
 }
