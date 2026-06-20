@@ -143,10 +143,57 @@ struct ProcessRecord {
         }
         return nullptr;
     }
+
+    ProcessTelemetry* FindClosestSnapshot(std::chrono::system_clock::time_point targetTime) {
+        size_t size = historyBuffer.size();
+
+        // Если буфер пуст, возвращаем nullptr
+        if (size == 0) return nullptr;
+
+        ProcessTelemetry* bestBefore = nullptr; // Ближайший снимок "ДО" или "В"
+        ProcessTelemetry* bestAfter = nullptr;  // Ближайший снимок "ПОСЛЕ"
+
+        // Проходим по всему буферу (или только по заполненной части)
+        // Если буфер не полон, используем historyIndex как границу
+        size_t limit = isBufferFull ? size : historyIndex;
+
+        for (size_t i = 0; i < limit; ++i) {
+            auto& entry = historyBuffer[i];
+
+            if (entry.time <= targetTime) {
+                // Кандидат из прошлого
+                if (!bestBefore || entry.time > bestBefore->time) {
+                    bestBefore = &entry;
+                }
+            }
+            else {
+                // Кандидат из будущего
+                if (!bestAfter || entry.time < bestAfter->time) {
+                    bestAfter = &entry;
+                }
+            }
+        }
+
+        // Если нет ни того, ни другого — возвращаем пустоту
+        if (!bestBefore && !bestAfter) return nullptr;
+
+        // Если есть только один кандидат
+        if (!bestBefore) return bestAfter;
+        if (!bestAfter) return bestBefore;
+
+        // Сравниваем, кто ближе
+        auto diffBefore = targetTime - bestBefore->time;
+        auto diffAfter = bestAfter->time - targetTime;
+
+        // Возвращаем того, у кого дельта меньше
+        return (diffBefore <= diffAfter) ? bestBefore : bestAfter;
+    }
+
 };
 
-// --- Telemetry Monitor ---
-
+/*
+* @brief главный класс, который хранит в себе все снимки для процессов
+*/
 class SystemPerformanceTelemetryMonitor {
 private:
     mutable std::shared_mutex m_mutex;
@@ -275,7 +322,7 @@ public:
                 else record.processName = L"Unknown";
             }
 
-            PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>(
+            PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>( ///< вот тут магическое число 0x100, но оно работает, если брать sizeof(структура-system-process-information), то работает некорректно, ему именно нужно 256 байт 
                 reinterpret_cast<BYTE*>(pData) + 0x100
                 );
 
@@ -307,7 +354,7 @@ public:
             // Записываем собранную метрику
             entry.contextSwitches = totalContextSwitches;
 
-            entry.cpuUsage = CalculateCpuUsage(record, 10);
+            entry.cpuUsage = CalculateCpuUsage(record, 10); ///< время cpu считаем, используя последние 10 записей, чтобы избежать мнимых резких скачков
 
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
@@ -322,12 +369,12 @@ public:
         }
     }
 
-    // Удаление "мертвых" процессов (которые не обновлялись 5 секунд)
+    // Удаление "мертвых" процессов (которые не обновлялись n секунд)
     void PruneDatabase() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto now = std::chrono::system_clock::now();
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
-            if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
+            if (now - it->second.lastUpdate > std::chrono::seconds(10)) { ///< 10 секунд
                 // Если запись в базе - это тот же процесс, что и активный в индексе, удаляем из индекса
                 auto activeIt = m_activePidMap.find(it->first.pid);
                 if (activeIt != m_activePidMap.end() && activeIt->second.QuadPart == it->first.createTime.QuadPart) {

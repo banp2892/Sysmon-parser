@@ -4,10 +4,37 @@
 #include <vector>
 #include <string>
 #include "json.hpp"
-
+#include "Metrics.h"
 
 
 #pragma comment(lib, "wevtapi.lib")
+
+    /**
+     * @brief Преобразует wstring в string (UTF-8).
+     * @param wstr Исходная широкая строка.
+     * @return std::string Строка в кодировке UTF-8.
+     */
+inline std::string WStringToString(const std::wstring& wstr) {
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string str(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
+    return str;
+}
+
+
+/**
+* @brief преобразует system_clock в нормальный формат, понятный человеку
+*/
+
+std::string FormatTime(std::chrono::system_clock::time_point tp) {
+    auto time = std::chrono::system_clock::to_time_t(tp);
+    struct tm tm;
+    localtime_s(&tm, &time);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
 
 
     /**
@@ -42,6 +69,70 @@ struct StaticSysmonData {
     ///< указатель на структуру, которую получаем из метрик @todo
     bool hasTelemetry = false;
     ProcessTelemetry telemetrySnapshot;
+
+    /**
+ * @brief Преобразует структуру в JSON-формат.
+ * @return std::string JSON-представление данных процесса и его метрик.
+ */
+    std::string ToJson() const {
+        using json = nlohmann::json;
+
+        // --- Static Fields ---
+        json staticField = {
+            {"EventId", EventId},
+            {"UtcTime", UtcTime},
+            {"Image", Image},
+            {"ProcessId", ProcessId},
+            {"ProcessGuid", ProcessGuid},
+            {"CommandLine", WStringToString(commandLine)},
+            {"CompanyName", WStringToString(companyName)},
+            {"IntegrityLevel", integrityLevel},
+            {"ParentProcessGuid", WStringToString(ParentProcessGuid)},
+            {"ParentProcessId", ParentProcessId},
+            {"ParentImage", WStringToString(ParentImage)},
+            {"ParentCommandLine", WStringToString(ParentCommandLine)},
+            {"ParentUser", WStringToString(ParentUser)}
+        };
+
+        // --- Metrics Fields ---
+        json metrics;
+        if (hasTelemetry) {
+            const auto& t = telemetrySnapshot;
+            metrics = {
+                {"Time", FormatTime(t.time)},
+                {"CpuUsage", t.cpuUsage},
+                {"KernelTime", t.kernelTime},
+                {"UserTime", t.userTime},
+                {"ParentPid", t.ppid},
+                {"ThreadCount", t.threadCount},
+                {"HandleCount", t.handleCount},
+                {"PrivatePageCount", t.privatePageCount},
+                {"VirtualSize", t.virtualSize},
+                {"WorkingSetSize", t.workingSetSize},
+                {"PageFaultCount", t.pageFaultCount},
+                {"PagedPoolUsage", t.pagedPoolUsage},
+                {"NonPagedPoolUsage", t.nonPagedPoolUsage},
+                {"SessionId", t.sessionId},
+                {"ContextSwitches", t.contextSwitches}
+            };
+        }
+        else {
+            metrics = { {"Status", "NoData"} };
+        }
+
+        // Собираем всё в один объект
+        json j = {
+            {"Event", {
+                {"static_field", staticField},
+                {"metrics", metrics}
+            }}
+        };
+
+        // dump(4) делает JSON "красивым" (с отступами)
+        // если нужна компактность для передачи по сети, используйте просто dump()
+        return j.dump(4);
+    }
+
 };
 
 typedef enum _PROCESSINFOCLASS {
@@ -57,17 +148,7 @@ typedef long KPRIORITY;
  */
 namespace SysmonCollector {
 
-    /**
-     * @brief Преобразует wstring в string (UTF-8).
-     * @param wstr Исходная широкая строка.
-     * @return std::string Строка в кодировке UTF-8.
-     */
-    inline std::string WStringToString(const std::wstring& wstr) {
-        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-        std::string str(size_needed, 0);
-        WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
-        return str;
-    }
+    
 
     /**
      * @brief Получает XML-представление события Sysmon.
@@ -164,6 +245,7 @@ namespace SysmonCollector {
         ULONGLONG lastSeen = 0;
     };
 
+    
 
     /*
     * @brief Для склеивания с метриками и хранения данных о процессах, разделяемых GUID`ом

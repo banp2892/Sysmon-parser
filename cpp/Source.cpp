@@ -139,115 +139,80 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
     
 
 
-    if (!pMap->Exists(Guid)) { ///< Если записи не существует
-
-
-        SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
-       
-        pMap->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
-
-
-
-
-        if (pMap->size() % 5 == 0) {
-            // Оставляем флаг, чтобы в логе сразу видеть, если время "нулевое"
-            bool isTimeInvalid = (StaticSysmon.createTime.dwLowDateTime == 0 &&
-                StaticSysmon.createTime.dwHighDateTime == 0);
-
-            std::cout << "[DEBUG] Size: " << pMap->size()
-                << " | PID: " << pid
-                << " | Eventid: " << eventId
-                << " | UtcTime: " << (StaticSysmon.UtcTime.empty() ? "EMPTY" : StaticSysmon.UtcTime)
-                << " | CreateTime: " << (isTimeInvalid ? "INVALID" : FileTimeToReadable(StaticSysmon.createTime))
-                << " | Image: " << StaticSysmon.Image
-                << std::endl;
-        }
-
-
-
-    }
-    else {
-
-    }
-
-    auto* pRecord = pMonitor->GetRecord(pid);
-    if (pRecord) {
-        // Конвертируем время события из Sysmon в понятный формат для сравнения
-        auto logTime = ParseSysmonUtcTime(StaticSysmon.UtcTime);
-
-        // Находим ближайший срез метрик
-        auto* snapshot = pRecord->FindSnapshotAtTime(logTime);
-        if (snapshot) {
-            // Копируем данные метрик в нашу структуру
-            StaticSysmon.telemetrySnapshot = *snapshot;
-            StaticSysmon.hasTelemetry = true;
-        }
-    }
-
-
-    ///< @todo написать логику, если данные уже есть, возможно надо вызвать еще раз EnrichProcessData, и так же вызвать обогощение метриками
-
-
-    ///< @todo написать вызов функции, которая находит в базе метрик, наш процесс, чтобы скопировать оттуда данные
-
-
-    //if (eventId == 5) {
-    //    std::lock_guard<std::mutex> lock(g_CacheMutex);
-    //    g_ProcessCache.erase(pid);
+    //if (!pMap->Exists(Guid)) { ///< Если записи не существует
+    //    SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
+    //   
+    //    pMap->UpdateData(Guid, pid, StaticSysmon.createTime); ///< обнавляем данные
+    //    if (pMap->size() % 5 == 0) {
+    //        // Оставляем флаг, чтобы в логе сразу видеть, если время "нулевое"
+    //        bool isTimeInvalid = (StaticSysmon.createTime.dwLowDateTime == 0 &&
+    //            StaticSysmon.createTime.dwHighDateTime == 0);
+    //        std::cout << "[DEBUG] Size: " << pMap->size()
+    //            << " | PID: " << pid
+    //            << " | Eventid: " << eventId
+    //            << " | UtcTime: " << (StaticSysmon.UtcTime.empty() ? "EMPTY" : StaticSysmon.UtcTime)
+    //            << " | CreateTime: " << (isTimeInvalid ? "INVALID" : FileTimeToReadable(StaticSysmon.createTime))
+    //            << " | Image: " << StaticSysmon.Image
+    //            << std::endl;
+    //    }
     //}
     //else {
-    //    uint64_t last_cpu = 0;
-    //    {
-    //        std::lock_guard<std::mutex> lock(g_CacheMutex);
-    //        last_cpu = g_ProcessCache[pid].last_cpu_time;
-    //    }
-
-    //    // Обогащаем
-    //    json fullLog = LogEnricher::Enrich(xml, pid, last_cpu);
-    //    uint64_t startTime = 0;
-    //    std::string procName = "";
-
-
-    //    // 1. Проверяем, существует ли вообще ключ process_info
-    //    if (fullLog.contains("process_info") && fullLog["process_info"].is_object()) {
-
-    //        // 2. Получаем данные безопасно
-    //        auto& info = fullLog["process_info"];
-
-    //        // Используем тот ключ, который вы реально записали в Enrich (стандартно у нас start_time)
-    //        startTime = info.value("start_time", 0ULL);
-    //        procName = info.value("name", "Unknown");
-
-    //    }
-    //    else {
-    //        // Если ключа нет, выводим ошибку в консоль, чтобы понять, что не так
-    //        std::cerr << "[!] Debug: process_info key missing in log: " << fullLog.dump() << std::endl;
-    //    }
-    //    // вот если я убираю эти строчки, то перестает падать, дел в них
-    //    // Обновляем кэш, если данные получены успешно
-    //    if (fullLog.contains("metrics") && fullLog["metrics"].contains("_raw_cpu")) {
-    //        std::lock_guard<std::mutex> lock(g_CacheMutex);
-    //        g_ProcessCache[pid].last_cpu_time = fullLog["metrics"]["_raw_cpu"].get<uint64_t>();
-    //    }
-
-    //    // Запись в файл с автоматическим созданием пути
-    //    static std::string currentFile = GetFilePath();
-    //    std::ofstream file(currentFile, std::ios::app);
-    //    if (file.is_open()) {
-    //        file << fullLog.dump() << std::endl;
-    //    }
-    //    numbers_of_logs++;
-    //    //if (numbers_of_logs % 10 == 0) { 
-    //    std::cout << "[Event] PID: " << pid
-    //        << " | Name: " << procName
-    //        << " | Start: " << startTime
-    //        << " | EventID: " << eventId
-    //        << " | Total: " << numbers_of_logs
-
-
-    //        << std::endl;
-    //    //}
     //}
+
+    auto* pRecord = pMonitor->GetRecord(pid);
+    if (!pRecord) {
+        // ВАЖНО: Это сообщение поможет понять, почему нет телеметрии: 
+        // либо процесс еще не попал в базу, либо он уже удален (PID reuse).
+        std::cout << "[DEBUG] [Telemetry] Process record NOT FOUND for PID: " << pid
+            << " | Event: " << StaticSysmon.EventId << std::endl;
+    }
+    else {
+        auto logTime = ParseSysmonUtcTime(StaticSysmon.UtcTime);
+
+        // Дополнительная проверка на валидность времени
+        if (logTime == std::chrono::system_clock::time_point::min()) {
+            std::cout << "[DEBUG] [Telemetry] Failed to parse UtcTime for PID: " << pid << std::endl;
+        }
+
+        auto* snapshot = pRecord->FindClosestSnapshot(logTime);
+
+        if (snapshot) {
+            StaticSysmon.telemetrySnapshot = *snapshot;
+            StaticSysmon.hasTelemetry = true;
+
+            // Опционально: можно логировать успешное сопоставление
+            // std::cout << "[DEBUG] [Telemetry] Attached data for PID: " << pid << std::endl;
+        }
+        else {
+            // ЭТО КРИТИЧЕСКАЯ ТОЧКА. Если сюда попадает, значит:
+            // 1. У вас пустой буфер истории метрик
+            // 2. Или logTime "старше", чем самый старый снимок в буфере
+            // 3. Или процесс живой, но метрики еще ни разу не собрались
+            std::cout << "[DEBUG] [Telemetry] No snapshot found for PID: " << pid
+                << " at time: " << StaticSysmon.UtcTime << std::endl;
+        }
+    }
+
+    std::string jsonString = StaticSysmon.ToJson();
+
+    // 2. Сохраняем в файл (формат JSONL - каждая строка отдельный JSON)
+    static std::string currentFile = GetFilePath();
+    std::ofstream file(currentFile, std::ios::app);
+
+    if (file.is_open()) {
+        file << jsonString << std::endl;
+        file.close(); // Закрываем, чтобы данные сбросились на диск
+    }
+
+    // 3. Логируем в консоль (используем поля структуры для скорости)
+    numbers_of_logs++;
+    if (numbers_of_logs % 10 == 0) {
+        std::cout << "[Event] PID: " << StaticSysmon.ProcessId
+            << " | Name: " << StaticSysmon.Image.substr(StaticSysmon.Image.find_last_of("\\/") + 1)
+            << " | EventID: " << StaticSysmon.EventId
+            << " | Total: " << numbers_of_logs
+            << std::endl;
+    }
     return ERROR_SUCCESS;
 }
 
@@ -271,12 +236,6 @@ void MetricsCollectionWorker(SystemPerformanceTelemetryMonitor& monitor, std::at
     int counter = 0;
     while (running) {
         monitor.ExecuteQueryAndProcess();
-
-        // Добавим лог раз в 50 итераций (раз в секунду), чтобы не спамить
-        if (++counter % 50 == 0) {
-            std::cout << "[MetricsWorker] Working... Alive." << std::endl;
-        }
-
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     std::cout << "[MetricsWorker] Thread stopped." << std::endl;
