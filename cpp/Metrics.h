@@ -1,4 +1,4 @@
-#pragma once
+п»ї#pragma once
 #define NOMINMAX
 #include <windows.h>
 #include "MetricStructures.h"
@@ -15,7 +15,7 @@
 
 
 
-#include <cstddef> // Для offsetof
+#include <cstddef> // Р”Р»СЏ offsetof
 #include <optional>
 #include <shared_mutex>
 
@@ -27,7 +27,7 @@
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
 
 /**
- * @brief Включает поддержку ANSI-последовательностей в консоли Windows.
+ * @brief Р’РєР»СЋС‡Р°РµС‚ РїРѕРґРґРµСЂР¶РєСѓ ANSI-РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚РµР№ РІ РєРѕРЅСЃРѕР»Рё Windows.
  */
 void EnableAnsiSupport() {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -39,9 +39,9 @@ void EnableAnsiSupport() {
 }
 
 /**
- * @brief Форматирует байты в строку (MB или GB).
- * @param bytes Размер в байтах.
- * @return Отформатированная строка.
+ * @brief Р¤РѕСЂРјР°С‚РёСЂСѓРµС‚ Р±Р°Р№С‚С‹ РІ СЃС‚СЂРѕРєСѓ (MB РёР»Рё GB).
+ * @param bytes Р Р°Р·РјРµСЂ РІ Р±Р°Р№С‚Р°С….
+ * @return РћС‚С„РѕСЂРјР°С‚РёСЂРѕРІР°РЅРЅР°СЏ СЃС‚СЂРѕРєР°.
  */
 std::wstring FormatMemory(SIZE_T bytes) {
     SIZE_T mb = bytes / 1024 / 1024;
@@ -63,7 +63,7 @@ std::wstring FormatMemory(SIZE_T bytes) {
 
 
 /**
- * @brief Тип функции для вызова NtQuerySystemInformation.
+ * @brief РўРёРї С„СѓРЅРєС†РёРё РґР»СЏ РІС‹Р·РѕРІР° NtQuerySystemInformation.
  */
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
@@ -73,7 +73,7 @@ typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     );
 
 /**
- * @brief Хранит предыдущие значения для расчета дельты метрик.
+ * @brief РҐСЂР°РЅРёС‚ РїСЂРµРґС‹РґСѓС‰РёРµ Р·РЅР°С‡РµРЅРёСЏ РґР»СЏ СЂР°СЃС‡РµС‚Р° РґРµР»СЊС‚С‹ РјРµС‚СЂРёРє.
  */
 struct ProcessHistoricalSnapshot {
     ULONGLONG lastKernelTime = 0;
@@ -85,7 +85,7 @@ struct ProcessHistoricalSnapshot {
 };
 
 /**
- * @brief Уникальный идентификатор процесса на основе PID и времени создания.
+ * @brief РЈРЅРёРєР°Р»СЊРЅС‹Р№ РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїСЂРѕС†РµСЃСЃР° РЅР° РѕСЃРЅРѕРІРµ PID Рё РІСЂРµРјРµРЅРё СЃРѕР·РґР°РЅРёСЏ.
  */
 struct ProcessKey {
     DWORD pid;
@@ -97,7 +97,7 @@ struct ProcessKey {
 };
 
 /**
- * @brief Хешер для ключа процесса.
+ * @brief РҐРµС€РµСЂ РґР»СЏ РєР»СЋС‡Р° РїСЂРѕС†РµСЃСЃР°.
  */
 struct ProcessKeyHasher {
     std::size_t operator()(const ProcessKey& k) const {
@@ -106,7 +106,7 @@ struct ProcessKeyHasher {
 };
 
 /**
- * @brief Содержит телеметрию процесса на момент измерения.
+ * @brief РЎРѕРґРµСЂР¶РёС‚ С‚РµР»РµРјРµС‚СЂРёСЋ РїСЂРѕС†РµСЃСЃР° РЅР° РјРѕРјРµРЅС‚ РёР·РјРµСЂРµРЅРёСЏ.
  */
 struct ProcessTelemetry {
     std::chrono::system_clock::time_point time;
@@ -127,7 +127,7 @@ struct ProcessTelemetry {
 };
 
 /**
- * @brief Хранит исторические данные и телеметрию процесса.
+ * @brief РҐСЂР°РЅРёС‚ РёСЃС‚РѕСЂРёС‡РµСЃРєРёРµ РґР°РЅРЅС‹Рµ Рё С‚РµР»РµРјРµС‚СЂРёСЋ РїСЂРѕС†РµСЃСЃР°.
  */
 struct ProcessRecord {
     std::wstring processName;
@@ -139,17 +139,17 @@ struct ProcessRecord {
     bool isBufferFull = false;
 
     /**
-     * @brief Инициализирует запись с заданным размером буфера.
-     * @param bufferSize Максимальное количество хранимых снимков.
+     * @brief РРЅРёС†РёР°Р»РёР·РёСЂСѓРµС‚ Р·Р°РїРёСЃСЊ СЃ Р·Р°РґР°РЅРЅС‹Рј СЂР°Р·РјРµСЂРѕРј Р±СѓС„РµСЂР°.
+     * @param bufferSize РњР°РєСЃРёРјР°Р»СЊРЅРѕРµ РєРѕР»РёС‡РµСЃС‚РІРѕ С…СЂР°РЅРёРјС‹С… СЃРЅРёРјРєРѕРІ.
      */
     ProcessRecord(size_t bufferSize = 600) {
         historyBuffer.resize(bufferSize);
     }
 
     /**
-     * @brief Ищет последний снимок, сделанный не позднее целевого времени.
-     * @param targetTime Целевое время поиска.
-     * @return Указатель на найденный снимок или nullptr.
+     * @brief РС‰РµС‚ РїРѕСЃР»РµРґРЅРёР№ СЃРЅРёРјРѕРє, СЃРґРµР»Р°РЅРЅС‹Р№ РЅРµ РїРѕР·РґРЅРµРµ С†РµР»РµРІРѕРіРѕ РІСЂРµРјРµРЅРё.
+     * @param targetTime Р¦РµР»РµРІРѕРµ РІСЂРµРјСЏ РїРѕРёСЃРєР°.
+     * @return РЈРєР°Р·Р°С‚РµР»СЊ РЅР° РЅР°Р№РґРµРЅРЅС‹Р№ СЃРЅРёРјРѕРє РёР»Рё nullptr.
      */
     ProcessTelemetry* FindSnapshotAtTime(std::chrono::system_clock::time_point targetTime) {
         size_t size = historyBuffer.size();
@@ -165,9 +165,9 @@ struct ProcessRecord {
     }
 
     /**
-     * @brief Ищет ближайший по времени снимок относительно заданного момента.
-     * @param targetTime Целевое время поиска.
-     * @return Указатель на ближайший снимок или nullptr.
+     * @brief РС‰РµС‚ Р±Р»РёР¶Р°Р№С€РёР№ РїРѕ РІСЂРµРјРµРЅРё СЃРЅРёРјРѕРє РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅРѕ Р·Р°РґР°РЅРЅРѕРіРѕ РјРѕРјРµРЅС‚Р°.
+     * @param targetTime Р¦РµР»РµРІРѕРµ РІСЂРµРјСЏ РїРѕРёСЃРєР°.
+     * @return РЈРєР°Р·Р°С‚РµР»СЊ РЅР° Р±Р»РёР¶Р°Р№С€РёР№ СЃРЅРёРјРѕРє РёР»Рё nullptr.
      */
     ProcessTelemetry* FindClosestSnapshot(std::chrono::system_clock::time_point targetTime) {
         size_t size = historyBuffer.size();
@@ -204,7 +204,7 @@ struct ProcessRecord {
     }
 };
 /**
- * @brief Главный класс для мониторинга телеметрии системных процессов.
+ * @brief Р“Р»Р°РІРЅС‹Р№ РєР»Р°СЃСЃ РґР»СЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР° С‚РµР»РµРјРµС‚СЂРёРё СЃРёСЃС‚РµРјРЅС‹С… РїСЂРѕС†РµСЃСЃРѕРІ.
  */
 class SystemPerformanceTelemetryMonitor {
 private:
@@ -217,7 +217,7 @@ private:
     std::unordered_map<DWORD, LARGE_INTEGER> m_activePidMap;
 
     /**
-     * @brief Ищет адрес функции NtQuerySystemInformation в ntdll.dll.
+     * @brief РС‰РµС‚ Р°РґСЂРµСЃ С„СѓРЅРєС†РёРё NtQuerySystemInformation РІ ntdll.dll.
      */
     void LocateNativeEntryPoints() {
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
@@ -229,7 +229,7 @@ private:
 
 public:
     /**
-     * @brief Инициализирует монитор, подготавливает буферы и кэш.
+     * @brief РРЅРёС†РёР°Р»РёР·РёСЂСѓРµС‚ РјРѕРЅРёС‚РѕСЂ, РїРѕРґРіРѕС‚Р°РІР»РёРІР°РµС‚ Р±СѓС„РµСЂС‹ Рё РєСЌС€.
      */
     SystemPerformanceTelemetryMonitor() {
         LocateNativeEntryPoints();
@@ -239,10 +239,10 @@ public:
     }
 
     /**
-     * @brief Получает копию записи телеметрии для указанного процесса.
-     * @param pid Идентификатор процесса.
-     * @param createTime Время создания процесса.
-     * @return std::optional с данными записи или std::nullopt, если процесс не найден.
+     * @brief РџРѕР»СѓС‡Р°РµС‚ РєРѕРїРёСЋ Р·Р°РїРёСЃРё С‚РµР»РµРјРµС‚СЂРёРё РґР»СЏ СѓРєР°Р·Р°РЅРЅРѕРіРѕ РїСЂРѕС†РµСЃСЃР°.
+     * @param pid РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїСЂРѕС†РµСЃСЃР°.
+     * @param createTime Р’СЂРµРјСЏ СЃРѕР·РґР°РЅРёСЏ РїСЂРѕС†РµСЃСЃР°.
+     * @return std::optional СЃ РґР°РЅРЅС‹РјРё Р·Р°РїРёСЃРё РёР»Рё std::nullopt, РµСЃР»Рё РїСЂРѕС†РµСЃСЃ РЅРµ РЅР°Р№РґРµРЅ.
      */
     std::optional<ProcessRecord> GetRecord(DWORD pid, LARGE_INTEGER createTime) const {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -257,7 +257,7 @@ public:
     }
 
     /**
-     * @brief Выполняет запрос к системному API и обновляет локальную базу данных.
+     * @brief Р’С‹РїРѕР»РЅСЏРµС‚ Р·Р°РїСЂРѕСЃ Рє СЃРёСЃС‚РµРјРЅРѕРјСѓ API Рё РѕР±РЅРѕРІР»СЏРµС‚ Р»РѕРєР°Р»СЊРЅСѓСЋ Р±Р°Р·Сѓ РґР°РЅРЅС‹С….
      */
     void ExecuteQueryAndProcess() {
         if (!m_pfnNtQuerySystemInformation) return;
@@ -289,10 +289,10 @@ public:
     }
 
     /**
-     * @brief Получает запись процесса по PID и времени создания.
-     * @param pid Идентификатор процесса.
-     * @param createTime Время создания процесса (LARGE_INTEGER).
-     * @return Указатель на запись или nullptr, если не найдено.
+     * @brief РџРѕР»СѓС‡Р°РµС‚ Р·Р°РїРёСЃСЊ РїСЂРѕС†РµСЃСЃР° РїРѕ PID Рё РІСЂРµРјРµРЅРё СЃРѕР·РґР°РЅРёСЏ.
+     * @param pid РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїСЂРѕС†РµСЃСЃР°.
+     * @param createTime Р’СЂРµРјСЏ СЃРѕР·РґР°РЅРёСЏ РїСЂРѕС†РµСЃСЃР° (LARGE_INTEGER).
+     * @return РЈРєР°Р·Р°С‚РµР»СЊ РЅР° Р·Р°РїРёСЃСЊ РёР»Рё nullptr, РµСЃР»Рё РЅРµ РЅР°Р№РґРµРЅРѕ.
      */
     ProcessRecord* GetRecord(DWORD pid, LARGE_INTEGER createTime) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -307,9 +307,9 @@ public:
     }
 
     /**
-     * @brief Получает запись наиболее актуального процесса по его PID.
-     * @param pid Идентификатор процесса.
-     * @return Указатель на запись или nullptr.
+     * @brief РџРѕР»СѓС‡Р°РµС‚ Р·Р°РїРёСЃСЊ РЅР°РёР±РѕР»РµРµ Р°РєС‚СѓР°Р»СЊРЅРѕРіРѕ РїСЂРѕС†РµСЃСЃР° РїРѕ РµРіРѕ PID.
+     * @param pid РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїСЂРѕС†РµСЃСЃР°.
+     * @return РЈРєР°Р·Р°С‚РµР»СЊ РЅР° Р·Р°РїРёСЃСЊ РёР»Рё nullptr.
      */
     ProcessRecord* GetRecord(DWORD pid) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -329,7 +329,7 @@ public:
     }
 
     /**
-     * @brief Разбирает буфер данных из NtQuerySystemInformation и обновляет телеметрию.
+     * @brief Р Р°Р·Р±РёСЂР°РµС‚ Р±СѓС„РµСЂ РґР°РЅРЅС‹С… РёР· NtQuerySystemInformation Рё РѕР±РЅРѕРІР»СЏРµС‚ С‚РµР»РµРјРµС‚СЂРёСЋ.
      */
     void ParseBuffer() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -392,7 +392,7 @@ public:
     }
 
     /**
-     * @brief Удаляет из базы записи процессов, не обновлявшиеся более 10 секунд.
+     * @brief РЈРґР°Р»СЏРµС‚ РёР· Р±Р°Р·С‹ Р·Р°РїРёСЃРё РїСЂРѕС†РµСЃСЃРѕРІ, РЅРµ РѕР±РЅРѕРІР»СЏРІС€РёРµСЃСЏ Р±РѕР»РµРµ 10 СЃРµРєСѓРЅРґ.
      */
     void PruneDatabase() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -412,10 +412,10 @@ public:
     }
 
     /**
-     * @brief Получает запись активного процесса по его PID.
-     * @param pid Идентификатор процесса.
-     * @param outRecord Ссылка для записи результата.
-     * @return true если запись найдена, false в противном случае.
+     * @brief РџРѕР»СѓС‡Р°РµС‚ Р·Р°РїРёСЃСЊ Р°РєС‚РёРІРЅРѕРіРѕ РїСЂРѕС†РµСЃСЃР° РїРѕ РµРіРѕ PID.
+     * @param pid РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїСЂРѕС†РµСЃСЃР°.
+     * @param outRecord РЎСЃС‹Р»РєР° РґР»СЏ Р·Р°РїРёСЃРё СЂРµР·СѓР»СЊС‚Р°С‚Р°.
+     * @return true РµСЃР»Рё Р·Р°РїРёСЃСЊ РЅР°Р№РґРµРЅР°, false РІ РїСЂРѕС‚РёРІРЅРѕРј СЃР»СѓС‡Р°Рµ.
      */
     bool GetActiveRecordByPid(DWORD pid, ProcessRecord& outRecord) const {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -432,10 +432,10 @@ public:
     }
 
     /**
-     * @brief Вычисляет процент использования CPU процессом на основе истории.
-     * @param record Запись процесса.
-     * @param lookbackFrames Количество кадров для усреднения.
-     * @return Процент использования CPU (от 0.0 до 100.0 * количество ядер).
+     * @brief Р’С‹С‡РёСЃР»СЏРµС‚ РїСЂРѕС†РµРЅС‚ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ CPU РїСЂРѕС†РµСЃСЃРѕРј РЅР° РѕСЃРЅРѕРІРµ РёСЃС‚РѕСЂРёРё.
+     * @param record Р—Р°РїРёСЃСЊ РїСЂРѕС†РµСЃСЃР°.
+     * @param lookbackFrames РљРѕР»РёС‡РµСЃС‚РІРѕ РєР°РґСЂРѕРІ РґР»СЏ СѓСЃСЂРµРґРЅРµРЅРёСЏ.
+     * @return РџСЂРѕС†РµРЅС‚ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ CPU (РѕС‚ 0.0 РґРѕ 100.0 * РєРѕР»РёС‡РµСЃС‚РІРѕ СЏРґРµСЂ).
      */
     double CalculateCpuUsage(const ProcessRecord& record, int lookbackFrames) const {
         if (record.historyBuffer.empty()) return 0.0;
@@ -468,8 +468,8 @@ public:
 
 
     /**
-     * @brief Отображает топ процессов по потреблению CPU в консоль.
-     * @param topCount Количество отображаемых процессов.
+     * @brief РћС‚РѕР±СЂР°Р¶Р°РµС‚ С‚РѕРї РїСЂРѕС†РµСЃСЃРѕРІ РїРѕ РїРѕС‚СЂРµР±Р»РµРЅРёСЋ CPU РІ РєРѕРЅСЃРѕР»СЊ.
+     * @param topCount РљРѕР»РёС‡РµСЃС‚РІРѕ РѕС‚РѕР±СЂР°Р¶Р°РµРјС‹С… РїСЂРѕС†РµСЃСЃРѕРІ.
      */
     void DisplayTopProcesses(int topCount) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
@@ -532,7 +532,7 @@ public:
         std::wcout << L"Approx. memory footprint: " << FormatMemory(totalHistorySnapshots * sizeof(ProcessTelemetry)) << std::endl;
         std::wcout << L"========================================================\n" << std::endl;
 
-        std::wcout << L"--- ТОП-" << topCount << L" ПРОЦЕССОВ (Расширенная телеметрия) ---\n";
+        std::wcout << L"--- РўРћРџ-" << topCount << L" РџР РћР¦Р•РЎРЎРћР’ (Р Р°СЃС€РёСЂРµРЅРЅР°СЏ С‚РµР»РµРјРµС‚СЂРёСЏ) ---\n";
 
         std::wcout << std::left
             << std::setw(7) << L"PID"
