@@ -78,25 +78,29 @@ def prepare_process_sequence(events):
 
 def main():
     root_folder = input("Введите путь к папке с логами: ").strip()
-    
-    # Генерируем уникальное имя для папки запуска: КорневойПроцесс_GUID_Время
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Сначала найдем корневой процесс для названия папки
+    # --- ЛОГИКА ОПРЕДЕЛЕНИЯ КОРНЕВОГО ПРОЦЕССА ---
     root_info = {"name": "root", "guid": "0000"}
+    found_root = False
+    
     for root, dirs, files in os.walk(root_folder):
         if "events.json" in files:
-            with open(os.path.join(root, "events.json"), 'r', encoding='utf-8') as f:
-                events = json.load(f)
-            
-            if events and events[0].get("parent_guid") is None:
-                folder_name = os.path.basename(root)
-                parts = folder_name.split('_', 1)
+            try:
+                with open(os.path.join(root, "events.json"), 'r', encoding='utf-8') as f:
+                    events = json.load(f)
                 
-                # Присваиваем имя и GUID
-                root_info["name"] = parts[0].replace(".exe", "")
-                root_info["guid"] = parts[1] if len(parts) > 1 else "root"
-                break
+                # Ищем процесс, у которого нет родителя (или GUID родителя пустой)
+                statics = events[0].get("statics", {})
+                p_guid = statics.get("ParentProcessGuid", "")
+                
+                if not p_guid or p_guid == "00000000-0000-0000-0000-000000000000":
+                    full_image = statics.get("Image", "root.exe")
+                    root_info["name"] = os.path.basename(full_image).lower().replace('.exe', '')
+                    root_info["guid"] = statics.get("ProcessGuid", "0000").strip("{}")[:8]
+                    found_root = True
+                    break
+            except: continue
     
     # Создаем итоговую папку: Корневой_GUID_Время
     folder_name = f"{root_info['name']}_{root_info['guid']}_{timestamp_str}"
@@ -107,7 +111,7 @@ def main():
     master_log = []
     process_counter = 0
 
-    # Обработка
+    # Обработка всех процессов
     for root, dirs, files in os.walk(root_folder):
         if "events.json" in files:
             file_path = os.path.join(root, "events.json")
@@ -116,29 +120,22 @@ def main():
                     events = json.load(f)
                 
                 if not events: continue
-                
                 process_counter += 1
-                folder_base_name = os.path.basename(root)
-                parts = folder_base_name.split('_', 1)
                 
-                # Если частей 2, то guid — это вторая часть, иначе — имя папки
-                guid = parts[1] if len(parts) > 1 else "unknown"
+                # Берем GUID из текущего процесса для имени файла
+                statics = events[0].get("statics", {})
+                guid = statics.get("ProcessGuid", "unknown").strip("{}")[:8]
+                full_image = statics.get("Image", "unknown")
+                proc_name = os.path.basename(full_image).lower().replace('.exe', '')
                 
-                # Имя процесса берем из JSON, как вы и делали
-                full_name = events[0].get("process_info", {}).get("name", "unknown").lower()
-                proc_name = full_name[:-4] if full_name.endswith('.exe') else full_name
-                
-                # Имя файла теперь будет гарантированно уникальным
                 filename = f"{proc_name}_{guid}_{process_counter}.csv"
                 save_path = os.path.join(output_base_dir, filename)
                 
-                # Обработка
+                # Обработка дельт
                 proc_features = prepare_process_sequence(events)
                 pd.DataFrame(proc_features).to_csv(save_path, index=False)
                 
-                # Добавление в мастер-лог
-                for item in proc_features:
-                    master_log.append(item)
+                master_log.extend(proc_features)
                     
             except Exception as e:
                 print(f"Ошибка в {file_path}: {e}")

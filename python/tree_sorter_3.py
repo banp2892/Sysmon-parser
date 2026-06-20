@@ -19,11 +19,37 @@ def parse_line(line):
             "guid": guid,
             "parent_guid": parent_guid,
             "static": static,
-            "metrics": metrics,
-            "event_id": str(static.get("EventId", "0"))
+            "metrics": metrics
         }
     except Exception:
         return None
+
+def are_metrics_identical(m1, m2):
+    """
+    Явное сравнение полей. Мы руками берем каждый показатель из словаря.
+    """
+    # Список полей для сравнения
+    fields = [
+        "ContextSwitches", "CpuUsage", "HandleCount",
+        "NonPagedPoolUsage", "PageFaultCount", "PagedPoolUsage",
+        "ParentPid", "PrivatePageCount", "SessionId", "ThreadCount",
+        "VirtualSize", "WorkingSetSize"
+    ]
+    
+    for field in fields:
+        val1 = m1.get(field)
+        val2 = m2.get(field)
+        
+        # Если вдруг поля нет в одном из логов, считаем их разными
+        if val1 is None or val2 is None:
+            return False
+            
+        # Сравниваем значения
+        # Используем float для точности (0.0 и 0.00001)
+        if abs(float(val1) - float(val2)) > 0.0001:
+            return False
+            
+    return True
 
 def create_folder_structure(guid, tree, current_path):
     info = tree[guid]
@@ -72,7 +98,6 @@ def main():
                     "statics": {}, 
                     "events": [], 
                     "children": [], 
-                    "last_event_signature": None,
                     "parent_guid": data["parent_guid"]
                 }
             
@@ -81,28 +106,28 @@ def main():
                 if v and (k not in processes[guid]["statics"] or not processes[guid]["statics"][k]):
                     processes[guid]["statics"][k] = v
 
-            # Дедупликация и создание событий
-            event_signature = (data["event_id"], json.dumps(data["metrics"], sort_keys=True))
+            # Явная дедупликация: сравниваем текущие метрики с последними сохраненными
+            if processes[guid]["events"]:
+                last_metrics = processes[guid]["events"][-1]["metrics"]
+                if are_metrics_identical(data["metrics"], last_metrics):
+                    # Если поля совпали, увеличиваем счетчик копий
+                    processes[guid]["events"][-1]["copy"] += 1
+                    duplicate_count += 1
+                    continue
             
-            if processes[guid]["last_event_signature"] == event_signature:
-                processes[guid]["events"][-1]["copy"] += 1
-                duplicate_count += 1
-            else:
-                new_event = {
-                    "statics": processes[guid]["statics"],
-                    "metrics": data["metrics"],
-                    "copy": 0
-                }
-                processes[guid]["last_event_signature"] = event_signature
-                processes[guid]["events"].append(new_event)
+            # Если не совпали — это новое уникальное событие
+            new_event = {
+                "statics": processes[guid]["statics"],
+                "metrics": data["metrics"],
+                "copy": 0
+            }
+            processes[guid]["events"].append(new_event)
 
-    # Статистика в консоль
     print(f"\n--- СТАТИСТИКА ---")
     print(f"Всего обработано строк: {total_lines}")
     print(f"Дубликатов удалено: {duplicate_count}")
     print(f"Уникальных событий сохранено: {total_lines - duplicate_count}")
 
-    # Строим дерево
     roots = []
     for guid, info in processes.items():
         p_guid = info["parent_guid"]
