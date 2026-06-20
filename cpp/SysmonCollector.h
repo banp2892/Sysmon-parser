@@ -42,8 +42,11 @@ std::string FormatTime(std::chrono::system_clock::time_point tp) {
     * @brief Структура для хранения разобранных данных события Sysmon.
     */
 struct StaticSysmonData {
-    ///< Можно собрать из почти каждого ивента
 
+    std::string rawXml;
+
+
+    ///< Можно собрать из почти каждого ивента
     int EventId; ///< Номер приходящего ивента
     std::string UtcTime; ///< Время формирования ивента
 
@@ -71,9 +74,9 @@ struct StaticSysmonData {
     ProcessTelemetry telemetrySnapshot;
 
     /**
- * @brief Преобразует структуру в JSON-формат.
- * @return std::string JSON-представление данных процесса и его метрик.
- */
+     * @brief Преобразует структуру в JSON-формат.
+     * @return std::string JSON-представление данных процесса и его метрик.
+     */
     std::string ToJson() const {
         using json = nlohmann::json;
 
@@ -121,16 +124,17 @@ struct StaticSysmonData {
         }
 
         // Собираем всё в один объект
+        // raw_event вынесен наверх для удобства парсинга
         json j = {
+            {"raw_event", rawXml},
             {"Event", {
                 {"static_field", staticField},
                 {"metrics", metrics}
             }}
         };
 
-        // dump(4) делает JSON "красивым" (с отступами)
-        // если нужна компактность для передачи по сети, используйте просто dump()
-        return j.dump(4);
+        // ВАЖНО: используй просто dump(), а не dump(4) для лог-файлов!
+        return j.dump();
     }
 
 };

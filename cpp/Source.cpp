@@ -125,8 +125,10 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
         return ERROR_SUCCESS;
     }
 
-    StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml); ///< Парсим Sysmon структуру
 
+
+    StaticSysmonData StaticSysmon = SysmonCollector::ParseSysmonEvent(xml); ///< Парсим Sysmon структуру
+    StaticSysmon.rawXml = xml;
 
     
 
@@ -236,7 +238,7 @@ void MetricsCollectionWorker(SystemPerformanceTelemetryMonitor& monitor, std::at
     int counter = 0;
     while (running) {
         monitor.ExecuteQueryAndProcess();
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     std::cout << "[MetricsWorker] Thread stopped." << std::endl;
 }
