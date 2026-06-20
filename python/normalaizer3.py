@@ -66,7 +66,25 @@ def main():
     root_folder = input("Введите путь к папке с логами: ").strip()
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    output_base_dir = os.path.join("processed_nn_data", f"run_{timestamp_str}")
+    root_info = {"name": "root", "guid": "0000"}
+    
+    # Поиск корневого процесса
+    for root, dirs, files in os.walk(root_folder):
+        if "events.json" in files:
+            try:
+                with open(os.path.join(root, "events.json"), 'r', encoding='utf-8') as f:
+                    events = json.load(f)
+                statics = events[0].get("statics", {})
+                p_guid = statics.get("ParentProcessGuid", "")
+                if not p_guid or p_guid == "00000000-0000-0000-0000-000000000000":
+                    full_image = statics.get("Image", "root.exe")
+                    root_info["name"] = os.path.basename(full_image).lower().replace('.exe', '')
+                    root_info["guid"] = statics.get("ProcessGuid", "0000").strip("{}")
+                    break
+            except: continue
+    
+    folder_name = f"{root_info['name']}_{root_info['guid']}_{timestamp_str}"
+    output_base_dir = os.path.join("processed_nn_data", folder_name)
     os.makedirs(output_base_dir, exist_ok=True)
     
     master_log = []
@@ -82,18 +100,16 @@ def main():
                 if not events: continue
                 process_counter += 1
                 
-                # Имя и GUID из структуры statics
                 statics = events[0].get("statics", {})
+                guid = statics.get("ProcessGuid", "unknown").strip("{}")
                 full_image = statics.get("Image", "unknown")
                 proc_name = os.path.basename(full_image).lower().replace('.exe', '')
-                guid = statics.get("ProcessGuid", "unknown").strip("{}")[:8]
                 
                 filename = f"{proc_name}_{guid}_{process_counter}.csv"
                 save_path = os.path.join(output_base_dir, filename)
                 
                 proc_features = prepare_process_sequence(events)
                 pd.DataFrame(proc_features).to_csv(save_path, index=False)
-                
                 master_log.extend(proc_features)
                     
             except Exception as e:
