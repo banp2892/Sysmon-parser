@@ -434,14 +434,14 @@ namespace SysmonCollector {
 
         data.UtcTime = GetValue("UtcTime", false);
 
-        // 1. Парсинг EventID
+        // Парсинг EventID
         std::string eid = GetValue("EventID", true);
         if (!eid.empty()) {
             try { data.EventId = std::stoi(eid); }
             catch (...) { data.EventId = 0; }
         }
 
-        // 2. Базовые поля процесса (есть во многих ивентах)
+        // Базовые поля процесса
         data.ProcessGuid = GetValue("ProcessGuid", false);
         data.Image = GetValue("Image", false);
 
@@ -451,7 +451,7 @@ namespace SysmonCollector {
             catch (...) { data.ProcessId = 0; }
         }
 
-        // 3. Специфичные данные для EventID 1 (Process Create)
+        // EventID 1 (Process Create)
         if (data.EventId == 1) {
             // Командная строка
             std::string cmd = GetValue("CommandLine", false);

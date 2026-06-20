@@ -137,7 +137,7 @@ DWORD WINAPI SubscriptionCallback(EVT_SUBSCRIBE_NOTIFY_ACTION action, PVOID pCon
     std::string Guid = StaticSysmon.ProcessGuid;
 
     
-    
+    SysmonCollector::EnrichProcessData(pid, StaticSysmon); ///< Добавляем время и то, что не смогли дописать до этого
     
 
 
