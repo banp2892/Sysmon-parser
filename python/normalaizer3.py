@@ -5,6 +5,7 @@ import os
 import json
 from datetime import datetime
 
+# --- Функции остаются без изменений ---
 def shannon_entropy(s):
     s = str(s)
     if not s: return 0
@@ -27,21 +28,17 @@ def prepare_process_sequence(events):
         try: return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").timestamp()
         except: return 0
 
-    # Берем время из первого события
     prev_time = parse_dt(events[0]['metrics'].get('Time', '2026-06-20 00:00:00'))
     
     for e in events:
         metrics = e.get('metrics', {})
         statics = e.get('statics', {})
-        
         curr_time = parse_dt(metrics.get('Time', '2026-06-20 00:00:00'))
         delta_time = curr_time - prev_time
         
         features = {
             "event_id": int(statics.get('EventId', 0)),
             "delta_time": delta_time,
-            
-            # Метрики из вашего JSON
             "cpu_usage": metrics.get('CpuUsage', 0),
             "handle_count": metrics.get('HandleCount', 0),
             "thread_count": metrics.get('ThreadCount', 0),
@@ -49,48 +46,24 @@ def prepare_process_sequence(events):
             "private_bytes": metrics.get('PrivatePageCount', 0),
             "page_faults": metrics.get('PageFaultCount', 0),
             "context_switches": metrics.get('ContextSwitches', 0),
-            
-            # Статика
             "ent_cmd": shannon_entropy(statics.get('Image', '')),
             "path_cat": classify_path(statics.get('Image', '')),
-            
             "copy": e.get('copy', 0)
         }
-        
         sequence.append(features)
         prev_time = curr_time
-        
     return sequence
 
-def main():
-    root_folder = input("Введите путь к папке с логами: ").strip()
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    root_info = {"name": "root", "guid": "0000"}
-    
-    # Поиск корневого процесса
-    for root, dirs, files in os.walk(root_folder):
-        if "events.json" in files:
-            try:
-                with open(os.path.join(root, "events.json"), 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                statics = events[0].get("statics", {})
-                p_guid = statics.get("ParentProcessGuid", "")
-                if not p_guid or p_guid == "00000000-0000-0000-0000-000000000000":
-                    full_image = statics.get("Image", "root.exe")
-                    root_info["name"] = os.path.basename(full_image).lower().replace('.exe', '')
-                    root_info["guid"] = statics.get("ProcessGuid", "0000").strip("{}")
-                    break
-            except: continue
-    
-    folder_name = f"{root_info['name']}_{root_info['guid']}_{timestamp_str}"
-    output_base_dir = os.path.join("processed_nn_data", folder_name)
-    os.makedirs(output_base_dir, exist_ok=True)
-    
+# --- Новая логика обработки ---
+
+def process_case_folder(source_dir, output_dir):
+    """Обрабатывает одну конкретную папку с логами"""
+    os.makedirs(output_dir, exist_ok=True)
     master_log = []
     process_counter = 0
-
-    for root, dirs, files in os.walk(root_folder):
+    
+    # Ищем файлы events.json внутри этой папки
+    for root, dirs, files in os.walk(source_dir):
         if "events.json" in files:
             file_path = os.path.join(root, "events.json")
             try:
@@ -106,18 +79,51 @@ def main():
                 proc_name = os.path.basename(full_image).lower().replace('.exe', '')
                 
                 filename = f"{proc_name}_{guid}_{process_counter}.csv"
-                save_path = os.path.join(output_base_dir, filename)
+                save_path = os.path.join(output_dir, filename)
                 
                 proc_features = prepare_process_sequence(events)
                 pd.DataFrame(proc_features).to_csv(save_path, index=False)
                 master_log.extend(proc_features)
                     
             except Exception as e:
-                print(f"Ошибка в {file_path}: {e}")
-
+                print(f"  Ошибка в {file_path}: {e}")
+    
     if master_log:
-        pd.DataFrame(master_log).to_csv(os.path.join(output_base_dir, "master_chronology.csv"), index=False)
-        print(f"Готово! Обработано процессов: {process_counter}")
+        pd.DataFrame(master_log).to_csv(os.path.join(output_dir, "master_chronology.csv"), index=False)
+    return process_counter
+
+def main():
+    root_input_folder = input("Введите путь к родительской папке с наборами данных: ").strip()
+    if not os.path.exists(root_input_folder):
+        print("Путь не найден.")
+        return
+
+    # 1. Создаем общую папку для всех результатов
+    base_output_dir = "normalized_data"
+    os.makedirs(base_output_dir, exist_ok=True)
+
+    # 2. Генерируем уникальное имя для текущего запуска
+    folder_base_name = os.path.basename(os.path.normpath(root_input_folder))
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_run_name = f"normalized_{folder_base_name}_{timestamp_str}"
+    
+    # 3. Объединяем пути: normalized_data/normalized_имя_дата
+    output_root = os.path.join(base_output_dir, unique_run_name)
+    os.makedirs(output_root, exist_ok=True)
+    
+    print(f"Начинаю обработку. Результаты будут в: {output_root}")
+
+    # Перебираем все подпапки в указанном пути
+    for item in os.listdir(root_input_folder):
+        item_path = os.path.join(root_input_folder, item)
+        
+        if os.path.isdir(item_path):
+            print(f"Обработка папки: {item}")
+            # Создаем подпапку внутри папки текущего запуска
+            case_output_dir = os.path.join(output_root, item)
+            
+            count = process_case_folder(item_path, case_output_dir)
+            print(f"  -> Готово. Обработано процессов: {count}")
 
 if __name__ == "__main__":
     main()
