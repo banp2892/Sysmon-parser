@@ -26,7 +26,9 @@
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
 
-
+/**
+ * @brief Включает поддержку ANSI-последовательностей в консоли Windows.
+ */
 void EnableAnsiSupport() {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut == INVALID_HANDLE_VALUE) return;
@@ -36,6 +38,11 @@ void EnableAnsiSupport() {
     SetConsoleMode(hOut, dwMode);
 }
 
+/**
+ * @brief Форматирует байты в строку (MB или GB).
+ * @param bytes Размер в байтах.
+ * @return Отформатированная строка.
+ */
 std::wstring FormatMemory(SIZE_T bytes) {
     SIZE_T mb = bytes / 1024 / 1024;
     if (mb > 1024) {
@@ -55,6 +62,9 @@ std::wstring FormatMemory(SIZE_T bytes) {
 
 
 
+/**
+ * @brief Тип функции для вызова NtQuerySystemInformation.
+ */
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
     PVOID SystemInformation,
@@ -62,8 +72,9 @@ typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     PULONG ReturnLength
     );
 
-// --- Data Structures ---
-
+/**
+ * @brief Хранит предыдущие значения для расчета дельты метрик.
+ */
 struct ProcessHistoricalSnapshot {
     ULONGLONG lastKernelTime = 0;
     ULONGLONG lastUserTime = 0;
@@ -73,9 +84,9 @@ struct ProcessHistoricalSnapshot {
     std::chrono::system_clock::time_point lastSampleTime;
 };
 
-
-
-
+/**
+ * @brief Уникальный идентификатор процесса на основе PID и времени создания.
+ */
 struct ProcessKey {
     DWORD pid;
     LARGE_INTEGER createTime;
@@ -85,21 +96,22 @@ struct ProcessKey {
     }
 };
 
-
+/**
+ * @brief Хешер для ключа процесса.
+ */
 struct ProcessKeyHasher {
     std::size_t operator()(const ProcessKey& k) const {
         return std::hash<DWORD>{}(k.pid) ^ (std::hash<long long>{}(k.createTime.QuadPart) << 1);
     }
 };
 
+/**
+ * @brief Содержит телеметрию процесса на момент измерения.
+ */
 struct ProcessTelemetry {
     std::chrono::system_clock::time_point time;
-
-    // CPU метрики (для расчета %)
     ULONGLONG kernelTime;
     ULONGLONG userTime;
-
-    // Снепшот состояния (для Enrichment)
     DWORD ppid;
     DWORD threadCount;
     DWORD handleCount;
@@ -114,23 +126,31 @@ struct ProcessTelemetry {
     double cpuUsage;
 };
 
-
+/**
+ * @brief Хранит исторические данные и телеметрию процесса.
+ */
 struct ProcessRecord {
     std::wstring processName;
-    // ProcInfo тут больше не нужен, мы берем данные из последнего элемента истории
     std::chrono::system_clock::time_point lastUpdate;
     unsigned int visitCount = 0;
 
-    // Теперь буфер хранит полные снимки
     std::vector<ProcessTelemetry> historyBuffer;
     size_t historyIndex = 0;
     bool isBufferFull = false;
 
+    /**
+     * @brief Инициализирует запись с заданным размером буфера.
+     * @param bufferSize Максимальное количество хранимых снимков.
+     */
     ProcessRecord(size_t bufferSize = 600) {
         historyBuffer.resize(bufferSize);
     }
 
-    // Метод для поиска "точки во времени"
+    /**
+     * @brief Ищет последний снимок, сделанный не позднее целевого времени.
+     * @param targetTime Целевое время поиска.
+     * @return Указатель на найденный снимок или nullptr.
+     */
     ProcessTelemetry* FindSnapshotAtTime(std::chrono::system_clock::time_point targetTime) {
         size_t size = historyBuffer.size();
         size_t scanIndex = historyIndex;
@@ -144,56 +164,48 @@ struct ProcessRecord {
         return nullptr;
     }
 
+    /**
+     * @brief Ищет ближайший по времени снимок относительно заданного момента.
+     * @param targetTime Целевое время поиска.
+     * @return Указатель на ближайший снимок или nullptr.
+     */
     ProcessTelemetry* FindClosestSnapshot(std::chrono::system_clock::time_point targetTime) {
         size_t size = historyBuffer.size();
-
-        // Если буфер пуст, возвращаем nullptr
         if (size == 0) return nullptr;
 
-        ProcessTelemetry* bestBefore = nullptr; // Ближайший снимок "ДО" или "В"
-        ProcessTelemetry* bestAfter = nullptr;  // Ближайший снимок "ПОСЛЕ"
+        ProcessTelemetry* bestBefore = nullptr;
+        ProcessTelemetry* bestAfter = nullptr;
 
-        // Проходим по всему буферу (или только по заполненной части)
-        // Если буфер не полон, используем historyIndex как границу
         size_t limit = isBufferFull ? size : historyIndex;
 
         for (size_t i = 0; i < limit; ++i) {
             auto& entry = historyBuffer[i];
 
             if (entry.time <= targetTime) {
-                // Кандидат из прошлого
                 if (!bestBefore || entry.time > bestBefore->time) {
                     bestBefore = &entry;
                 }
             }
             else {
-                // Кандидат из будущего
                 if (!bestAfter || entry.time < bestAfter->time) {
                     bestAfter = &entry;
                 }
             }
         }
 
-        // Если нет ни того, ни другого — возвращаем пустоту
         if (!bestBefore && !bestAfter) return nullptr;
-
-        // Если есть только один кандидат
         if (!bestBefore) return bestAfter;
         if (!bestAfter) return bestBefore;
 
-        // Сравниваем, кто ближе
         auto diffBefore = targetTime - bestBefore->time;
         auto diffAfter = bestAfter->time - targetTime;
 
-        // Возвращаем того, у кого дельта меньше
         return (diffBefore <= diffAfter) ? bestBefore : bestAfter;
     }
-
 };
-
-/*
-* @brief главный класс, который хранит в себе все снимки для процессов
-*/
+/**
+ * @brief Главный класс для мониторинга телеметрии системных процессов.
+ */
 class SystemPerformanceTelemetryMonitor {
 private:
     mutable std::shared_mutex m_mutex;
@@ -201,12 +213,12 @@ private:
     std::vector<BYTE> m_telemetryBuffer;
     SYSTEM_INFO m_sysInfo;
 
-    // БД: Ключ - уникальный процесс, Значение - его данные
     std::unordered_map<ProcessKey, ProcessRecord, ProcessKeyHasher> m_processDatabase;
-
-    // Индекс для защиты от PID Reuse: Какой CreateTime сейчас "актуален" для этого PID
     std::unordered_map<DWORD, LARGE_INTEGER> m_activePidMap;
 
+    /**
+     * @brief Ищет адрес функции NtQuerySystemInformation в ntdll.dll.
+     */
     void LocateNativeEntryPoints() {
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll) {
@@ -216,27 +228,37 @@ private:
     }
 
 public:
+    /**
+     * @brief Инициализирует монитор, подготавливает буферы и кэш.
+     */
     SystemPerformanceTelemetryMonitor() {
         LocateNativeEntryPoints();
         GetSystemInfo(&m_sysInfo);
-        m_telemetryBuffer.resize(1024 * 1024 * 2); // 2MB начальный буфер
-        m_processDatabase.reserve(500); // Оптимизация аллокации
+        m_telemetryBuffer.resize(1024 * 1024 * 2);
+        m_processDatabase.reserve(500);
     }
 
-
-
+    /**
+     * @brief Получает копию записи телеметрии для указанного процесса.
+     * @param pid Идентификатор процесса.
+     * @param createTime Время создания процесса.
+     * @return std::optional с данными записи или std::nullopt, если процесс не найден.
+     */
     std::optional<ProcessRecord> GetRecord(DWORD pid, LARGE_INTEGER createTime) const {
-        std::shared_lock<std::shared_mutex> lock(m_mutex); // Shared lock (чтение)
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
 
         ProcessKey key{ pid, createTime };
         auto it = m_processDatabase.find(key);
 
         if (it != m_processDatabase.end()) {
-            return it->second; // Возвращаем копию
+            return it->second;
         }
         return std::nullopt;
     }
 
+    /**
+     * @brief Выполняет запрос к системному API и обновляет локальную базу данных.
+     */
     void ExecuteQueryAndProcess() {
         if (!m_pfnNtQuerySystemInformation) return;
 
@@ -250,7 +272,7 @@ public:
         );
 
         if (status == STATUS_INFO_LENGTH_MISMATCH) {
-            m_telemetryBuffer.resize(requiredSize + 1024 * 1024); ///< @todo тут возможно надо сделать более умный ресайз, иначе может падать при долгой работе
+            m_telemetryBuffer.resize(requiredSize + 1024 * 1024);
 
             status = m_pfnNtQuerySystemInformation(
                 SystemProcessInformation,
@@ -266,6 +288,12 @@ public:
         }
     }
 
+    /**
+     * @brief Получает запись процесса по PID и времени создания.
+     * @param pid Идентификатор процесса.
+     * @param createTime Время создания процесса (LARGE_INTEGER).
+     * @return Указатель на запись или nullptr, если не найдено.
+     */
     ProcessRecord* GetRecord(DWORD pid, LARGE_INTEGER createTime) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
 
@@ -273,26 +301,24 @@ public:
         auto it = m_processDatabase.find(key);
 
         if (it != m_processDatabase.end()) {
-            return &it->second; // Возвращаем адрес записи в мапе
+            return &it->second;
         }
-        return nullptr; // Не найдено
+        return nullptr;
     }
 
-
-    /*
-    * @brief возвращает запись о самом новом по времени создания процесс по его pid
-    * @todo возможно, надо добавить проверку, передавая время прихода лога, чтобы он не выдавал самый новый процесс, когда не надо
-    */
+    /**
+     * @brief Получает запись наиболее актуального процесса по его PID.
+     * @param pid Идентификатор процесса.
+     * @return Указатель на запись или nullptr.
+     */
     ProcessRecord* GetRecord(DWORD pid) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
 
-        // 1. Ищем актуальный CreateTime для этого PID
-        auto activeIt = m_activePidMap.find(pid); 
+        auto activeIt = m_activePidMap.find(pid);
         if (activeIt == m_activePidMap.end()) {
-            return nullptr; // Процесс не найден или неактивен
+            return nullptr;
         }
 
-        // 2. Ищем запись в базе
         ProcessKey key{ pid, activeIt->second };
         auto dbIt = m_processDatabase.find(key);
 
@@ -302,7 +328,9 @@ public:
         return nullptr;
     }
 
-
+    /**
+     * @brief Разбирает буфер данных из NtQuerySystemInformation и обновляет телеметрию.
+     */
     void ParseBuffer() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto currentTimePoint = std::chrono::system_clock::now();
@@ -322,39 +350,33 @@ public:
                 else record.processName = L"Unknown";
             }
 
-            PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>( ///< вот тут магическое число 0x100, но оно работает, если брать sizeof(структура-system-process-information), то работает некорректно, ему именно нужно 256 байт 
+            PSYSTEM_THREAD_INFORMATION pThreads = reinterpret_cast<PSYSTEM_THREAD_INFORMATION>(
                 reinterpret_cast<BYTE*>(pData) + 0x100
                 );
 
             ULONG totalContextSwitches = 0;
-            // Суммируем переключения контекста всех потоков этого процесса
             for (ULONG i = 0; i < pData->NumberOfThreads; i++) {
                 totalContextSwitches += pThreads[i].ContextSwitches;
             }
-            // ------------------------------------
 
             auto& entry = record.historyBuffer[record.historyIndex];
 
             entry.time = currentTimePoint;
             entry.kernelTime = pData->KernelTime.QuadPart;
             entry.userTime = pData->UserTime.QuadPart;
-
             entry.ppid = (DWORD)(uintptr_t)pData->InheritedFromUniqueProcessId;
             entry.threadCount = pData->NumberOfThreads;
             entry.handleCount = pData->HandleCount;
-
-            entry.privatePageCount = pData->PrivatePageCount;///< Соответсвует полю Reads I/O для system informer
+            entry.privatePageCount = pData->PrivatePageCount;
             entry.virtualSize = pData->VirtualMemoryCounters.VirtualSize;
             entry.workingSetSize = pData->VirtualMemoryCounters.WorkingSetSize;
             entry.pageFaultCount = (ULONG)pData->VirtualMemoryCounters.PageFaultCount;
             entry.pagedPoolUsage = pData->VirtualMemoryCounters.QuotaPagedPoolUsage;
             entry.nonPagedPoolUsage = pData->VirtualMemoryCounters.QuotaNonPagedPoolUsage;
             entry.sessionId = pData->SessionId;
-
-            // Записываем собранную метрику
             entry.contextSwitches = totalContextSwitches;
 
-            entry.cpuUsage = CalculateCpuUsage(record, 10); ///< время cpu считаем, используя последние 10 записей, чтобы избежать мнимых резких скачков
+            entry.cpuUsage = CalculateCpuUsage(record, 10);
 
             record.historyIndex = (record.historyIndex + 1) % record.historyBuffer.size();
             if (record.historyIndex == 0) record.isBufferFull = true;
@@ -369,13 +391,14 @@ public:
         }
     }
 
-    // Удаление "мертвых" процессов (которые не обновлялись n секунд)
+    /**
+     * @brief Удаляет из базы записи процессов, не обновлявшиеся более 10 секунд.
+     */
     void PruneDatabase() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto now = std::chrono::system_clock::now();
         for (auto it = m_processDatabase.begin(); it != m_processDatabase.end(); ) {
-            if (now - it->second.lastUpdate > std::chrono::seconds(10)) { ///< 10 секунд
-                // Если запись в базе - это тот же процесс, что и активный в индексе, удаляем из индекса
+            if (now - it->second.lastUpdate > std::chrono::seconds(10)) {
                 auto activeIt = m_activePidMap.find(it->first.pid);
                 if (activeIt != m_activePidMap.end() && activeIt->second.QuadPart == it->first.createTime.QuadPart) {
                     m_activePidMap.erase(activeIt);
@@ -388,7 +411,12 @@ public:
         }
     }
 
-    // Быстрый доступ к активному процессу по PID ($O(1)$)
+    /**
+     * @brief Получает запись активного процесса по его PID.
+     * @param pid Идентификатор процесса.
+     * @param outRecord Ссылка для записи результата.
+     * @return true если запись найдена, false в противном случае.
+     */
     bool GetActiveRecordByPid(DWORD pid, ProcessRecord& outRecord) const {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto it = m_activePidMap.find(pid);
@@ -403,34 +431,32 @@ public:
         return false;
     }
 
+    /**
+     * @brief Вычисляет процент использования CPU процессом на основе истории.
+     * @param record Запись процесса.
+     * @param lookbackFrames Количество кадров для усреднения.
+     * @return Процент использования CPU (от 0.0 до 100.0 * количество ядер).
+     */
     double CalculateCpuUsage(const ProcessRecord& record, int lookbackFrames) const {
         if (record.historyBuffer.empty()) return 0.0;
 
         size_t size = record.historyBuffer.size();
-
-        // 1. Индекс текущего (самого свежего) кадра
-        // Если мы внутри ParseBuffer, то historyIndex указывает на СЛЕДУЮЩИЙ слот, 
-        // поэтому берем (index - 1)
         size_t latestIdx = (record.historyIndex + size - 1) % size;
         const auto& latestSample = record.historyBuffer[latestIdx];
 
-        // 2. Определяем, сколько кадров отмотать назад
         size_t availableSamples = record.isBufferFull ? size : record.historyIndex;
         int actualLookback = (std::min)((int)availableSamples - 1, lookbackFrames);
 
         if (actualLookback <= 0) return 0.0;
 
-        // 3. Индекс кадра в прошлом
         size_t oldIdx = (latestIdx + size - actualLookback) % size;
         const auto& oldSample = record.historyBuffer[oldIdx];
 
-        // 4. Расчет времени
         auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(latestSample.time - oldSample.time).count();
         double duration100ns = static_cast<double>(durationNs) / 100.0;
 
         if (duration100ns <= 0) return 0.0;
 
-        // 5. Расчет CPU
         ULONGLONG deltaK = latestSample.kernelTime - oldSample.kernelTime;
         ULONGLONG deltaU = latestSample.userTime - oldSample.userTime;
 
@@ -441,6 +467,10 @@ public:
     }
 
 
+    /**
+     * @brief Отображает топ процессов по потреблению CPU в консоль.
+     * @param topCount Количество отображаемых процессов.
+     */
     void DisplayTopProcesses(int topCount) {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
 
@@ -468,14 +498,13 @@ public:
             const auto& key = it->first;
             const auto& record = it->second;
 
-            // Берем самый свежий снимок
             size_t latestIdx = (record.historyIndex + record.historyBuffer.size() - 1) % record.historyBuffer.size();
             const auto& latest = record.historyBuffer[latestIdx];
 
             list.push_back({
                 (DWORD)key.pid,
                 record.processName,
-                latest.cpuUsage, // <--- БЕРЕМ ГОТОВОЕ ЗНАЧЕНИЕ ИЗ ПАМЯТИ
+                latest.cpuUsage,
                 latest.ppid,
                 latest.sessionId,
                 latest.threadCount,
@@ -492,12 +521,10 @@ public:
             totalHistorySnapshots += record.historyBuffer.size();
         }
 
-        // Сортировка по CPU теперь работает моментально
         std::sort(list.begin(), list.end(), [](const ProcessDisplay& a, const ProcessDisplay& b) {
             return a.cpuUsage > b.cpuUsage;
             });
 
-        // ... (остальной код вывода остается без изменений) ...
         std::wcout << L"\n========================================================" << std::endl;
         std::wcout << L"DATABASE STATS:" << std::endl;
         std::wcout << L"Total Processes tracked: " << m_processDatabase.size() << std::endl;

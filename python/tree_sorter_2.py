@@ -5,50 +5,47 @@ from collections import defaultdict
 
 def parse_line(line):
     try:
-        obj = json.loads(line)
+        data = json.loads(line)
+        event_root = data.get("Event", {})
+        if not event_root: return None
         
-        # 1. Извлекаем данные из переданных блоков
-        # Если в JSON уже есть готовые блоки, используем их, иначе — берем из корня
-        p_info = obj.get("process_info", obj) # fallback на случай если поля в корне
-        parent_info = obj.get("parent_info", obj)
-        metrics = obj.get("metrics", obj)
+        static = event_root.get("static_field", {})
+        metrics = event_root.get("metrics", {})
         
-        # XML данные для GUID (все еще нужны для связи процессов)
-        xml = obj.get("data", "")
-        guid_match = re.search(r"ProcessGuid['\"]?>\{([^}]+)\}", xml, re.IGNORECASE)
-        parent_guid_match = re.search(r"ParentProcessGuid['\"]?>\{([^}]+)\}", xml, re.IGNORECASE)
+        guid = static.get("ProcessGuid", "").strip("{}").lower()
+        parent_guid = static.get("ParentProcessGuid", "").strip("{}").lower()
         
-        guid = guid_match.group(1).lower() if guid_match else obj.get("guid")
-        parent_guid = parent_guid_match.group(1).lower() if parent_guid_match else obj.get("parent_guid")
-        
+        # Если GUID пустой, событие не валидно для дерева
         if not guid: return None
         
+        # Преобразуем время для корректных расчетов
+        try:
+            ts_str = static.get("UtcTime", "2026-06-20 00:00:00")
+            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
+            timestamp = dt.timestamp()
+        except:
+            timestamp = 0
+
         return {
             "guid": guid,
             "parent_guid": parent_guid,
-            "event_id": str(obj.get("event_id", re.search(r'<EventID>(\d+)</EventID>', xml).group(1) if re.search(r'<EventID>(\d+)</EventID>', xml) else "0")),
-            "timestamp": obj.get("timestamp", 0),
-            
-            # Разделение по блокам
+            "event_id": str(static.get("EventId", "0")),
+            "timestamp": timestamp,
             "process_info": {
-                "name": get_clean_name(xml) if get_clean_name(xml) != "unknown" else p_info.get("name", "unknown"),
-                "company": p_info.get("company", "unknown"),
-                "cmd": p_info.get("command_line", p_info.get("cmd", "")),
-                "isSigned": p_info.get("is_signed", False)
+                "name": os.path.basename(static.get("Image", "unknown")),
+                "cmd": static.get("CommandLine", ""),
+                "isSigned": False # В новом формате нужно искать в XML, если нужно
             },
             "metrics": metrics,
             "parent_info": {
-                "pid": parent_info.get("parent_pid", parent_info.get("pid", 0)),
-                "name": parent_info.get("name", "unknown"),
-                "cmd": parent_info.get("command_line", ""), # Добавляем cmd родителя
-                "integrity": parent_info.get("integrity_level", 0),
-                "elevated": parent_info.get("is_elevated", False),
-                "start_time": parent_info.get("parent_start_time", 0),
-                "is_service": parent_info.get("is_service", False),
-                "isSigned": parent_info.get("is_signed", False)
+                "pid": static.get("ParentProcessId", 0),
+                "name": os.path.basename(static.get("ParentImage", "unknown")),
+                "integrity": static.get("IntegrityLevel", 0),
+                "elevated": False, # Требует логики определения по IntegrityLevel
+                "is_service": False # Можно определять по имени 'System' или путям
             }
         }
-    except Exception as e:
+    except Exception:
         return None
 
 def get_clean_name(xml):

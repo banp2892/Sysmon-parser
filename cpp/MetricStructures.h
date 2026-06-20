@@ -1,3 +1,7 @@
+/**
+ * @brief Определения структур для работы с Native API (NtQuerySystemInformation).
+ */
+
 #pragma once
 #ifndef METRIC_STRUCTURES_H
 #define METRIC_STRUCTURES_H
@@ -6,13 +10,13 @@
 #include <windows.h>
 #include <iostream>
 
-// --- Native API Definitions ---
+ /** @brief Коды статусов Native API. */
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
 
-// Защита от дублирования определений
 #ifndef _SYSTEM_INFORMATION_CLASS_DEFINED
 #define _SYSTEM_INFORMATION_CLASS_DEFINED
+/** @brief Классы системной информации для запроса. */
 typedef enum _SYSTEM_INFORMATION_CLASS {
     SystemProcessInformation = 5
 } SYSTEM_INFORMATION_CLASS;
@@ -20,6 +24,7 @@ typedef enum _SYSTEM_INFORMATION_CLASS {
 
 #ifndef _UNICODE_STRING_DEFINED
 #define _UNICODE_STRING_DEFINED
+/** @brief Строковая структура Unicode для Native API. */
 typedef struct _UNICODE_STRING {
     USHORT Length;
     USHORT MaximumLength;
@@ -29,6 +34,7 @@ typedef struct _UNICODE_STRING {
 
 #ifndef _CLIENT_ID_DEFINED
 #define _CLIENT_ID_DEFINED
+/** @brief Идентификаторы потока и процесса. */
 typedef struct _CLIENT_ID {
     HANDLE UniqueProcess;
     HANDLE UniqueThread;
@@ -37,6 +43,7 @@ typedef struct _CLIENT_ID {
 
 #ifndef _SYSTEM_THREAD_INFORMATION_DEFINED
 #define _SYSTEM_THREAD_INFORMATION_DEFINED
+/** @brief Информация о конкретном потоке системы. */
 typedef struct _SYSTEM_THREAD_INFORMATION {
     LARGE_INTEGER KernelTime;
     LARGE_INTEGER UserTime;
@@ -55,6 +62,7 @@ typedef struct _SYSTEM_THREAD_INFORMATION {
 #pragma pack(push, 8)
 #ifndef _VM_COUNTERS_EX_DEFINED
 #define _VM_COUNTERS_EX_DEFINED
+/** @brief Структура счетчиков виртуальной памяти. */
 typedef struct _VM_COUNTERS_EX {
     SIZE_T PeakVirtualSize;
     SIZE_T VirtualSize;
@@ -73,6 +81,7 @@ typedef struct _VM_COUNTERS_EX {
 
 #ifndef _SYSTEM_PROCESS_INFORMATION_DEFINED
 #define _SYSTEM_PROCESS_INFORMATION_DEFINED
+/** @brief Полная информация о процессе, возвращаемая NtQuerySystemInformation. */
 typedef struct _SYSTEM_PROCESS_INFORMATION {
     ULONG NextEntryOffset;
     ULONG NumberOfThreads;
@@ -98,6 +107,7 @@ typedef struct _SYSTEM_PROCESS_INFORMATION {
 #endif
 #pragma pack(pop)
 
+/** @brief Определение типа функции NtQuerySystemInformation. */
 typedef NTSTATUS(WINAPI* pfnNtQuerySystemInformation)(
     SYSTEM_INFORMATION_CLASS SystemInformationClass,
     PVOID SystemInformation,
